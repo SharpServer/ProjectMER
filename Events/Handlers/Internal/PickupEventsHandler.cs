@@ -4,6 +4,7 @@ using InventorySystem.Items.Firearms.Modules;
 using LabApi.Events.Arguments.PlayerEvents;
 using LabApi.Events.CustomHandlers;
 using LabApi.Features.Wrappers;
+using ProjectMER.Features;
 using ProjectMER.Features.Objects;
 using FirearmPickup = LabApi.Features.Wrappers.FirearmPickup;
 
@@ -13,6 +14,7 @@ public class PickupEventsHandler : CustomEventsHandler
 {
 	internal static readonly Dictionary<ushort, SchematicObject> ButtonPickups = [];
 	internal static readonly Dictionary<ushort, int> PickupUsesLeft = [];
+	internal static readonly Dictionary<ushort, CustomItemPickupUseInfo> CustomItemPickupUses = [];
 
 	public override void OnPlayerSearchingPickup(PlayerSearchingPickupEventArgs ev)
 	{
@@ -26,6 +28,9 @@ public class PickupEventsHandler : CustomEventsHandler
 	public override void OnPlayerPickingUpItem(PlayerPickingUpItemEventArgs ev)
 	{
 		if (!ev.Pickup.Transform.TryGetComponentInParent(out MapEditorObject _))
+			return;
+
+		if (TryHandleCustomItemPickupUses(ev))
 			return;
 
 		if (!PickupUsesLeft.ContainsKey(ev.Pickup.Serial))
@@ -75,5 +80,32 @@ public class PickupEventsHandler : CustomEventsHandler
 		ev.IsAllowed = false;
 		ev.Pickup.IsInUse = false;
 		ev.Player.AddAmmo(ev.AmmoType, ev.AmmoAmount);
+	}
+
+	private static bool TryHandleCustomItemPickupUses(PlayerPickingUpItemEventArgs ev)
+	{
+		if (!CustomItemPickupUses.TryGetValue(ev.Pickup.Serial, out CustomItemPickupUseInfo useInfo))
+			return false;
+
+		if (useInfo.UsesLeft <= 1)
+		{
+			CustomItemPickupUses.Remove(ev.Pickup.Serial);
+			return true;
+		}
+
+		ev.IsAllowed = false;
+		ev.Pickup.IsInUse = false;
+
+		if (ItemSpawnpointCustomItemRegistry.TryGive(useInfo.CustomItemKey, ev.Pickup.Base, ev.Player))
+			useInfo.UsesLeft--;
+
+		return true;
+	}
+
+	internal sealed class CustomItemPickupUseInfo(string customItemKey, int usesLeft)
+	{
+		public string CustomItemKey { get; } = customItemKey;
+
+		public int UsesLeft { get; set; } = usesLeft;
 	}
 }

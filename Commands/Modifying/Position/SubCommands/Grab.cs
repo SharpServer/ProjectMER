@@ -1,8 +1,8 @@
-﻿using CommandSystem;
+using System.Linq;
+using CommandSystem;
 using LabApi.Features.Permissions;
 using LabApi.Features.Wrappers;
 using MEC;
-using Mirror;
 using ProjectMER.Features.Objects;
 using ProjectMER.Features.Serializable;
 using ProjectMER.Features.ToolGun;
@@ -46,15 +46,16 @@ public class Grab : ICommand
 		{
 			Timing.KillCoroutines(GrabbingPlayers[player]);
 			GrabbingPlayers.Remove(player);
+			RestorePhysicsState(player);
 
-			Room room = mapEditorObject.Room;
-			mapEditorObject.Base.Position = room.Name == MapGeneration.RoomName.Outside ? mapEditorObject.transform.position : mapEditorObject.Room.Transform.InverseTransformPoint(mapEditorObject.transform.position);
+			UpdateSerializedPosition(mapEditorObject, mapEditorObject.transform.position);
 			mapEditorObject.UpdateObjectAndCopies();
 
 			response = "Ungrabbed";
 			return true;
 		}
 
+		DisablePhysicsState(player, mapEditorObject);
 		GrabbingPlayers.Add(player, Timing.RunCoroutine(GrabbingCoroutine(player, mapEditorObject)));
 
 		response = "Grabbed";
@@ -67,37 +68,147 @@ public class Grab : ICommand
 		float multiplier = Vector3.Distance(position, mapEditorObject.transform.position);
 		Vector3 prevPos = position + (player.Camera.forward * multiplier);
 
-		while (true)
+		try
 		{
-			yield return Timing.WaitForSeconds(0.1f);
-
-			if (mapEditorObject == null || !ToolGunHandler.TryGetSelectedMapObject(player, out _))
-				break;
-
-			Vector3 newPos = mapEditorObject.transform.position = player.Camera.position + (player.Camera.forward * multiplier);
-
-			if (prevPos == newPos)
-				continue;
-
-			prevPos = newPos;
-			mapEditorObject.transform.position = prevPos;
-			if (mapEditorObject.Base is SerializableDoor _)
+			while (true)
 			{
-				NetworkServer.UnSpawn(mapEditorObject.gameObject);
-				NetworkServer.Spawn(mapEditorObject.gameObject);
+				yield return Timing.WaitForSeconds(0.02f);
+
+				if (mapEditorObject == null || !ToolGunHandler.TryGetSelectedMapObject(player, out _))
+					break;
+
+				Vector3 newPos = player.Camera.position + (player.Camera.forward * multiplier);
+
+				if ((prevPos - newPos).sqrMagnitude < 0.0001f)
+					continue;
+
+				prevPos = newPos;
+				MoveGrabbedObject(mapEditorObject, prevPos);
 			}
 		}
-
-		GrabbingPlayers.Remove(player);
-		if (mapEditorObject != null)
+		finally
 		{
-			mapEditorObject.Base.Position = mapEditorObject.Room.Transform.InverseTransformPoint(mapEditorObject.transform.position);
-			mapEditorObject.UpdateObjectAndCopies();
+			GrabbingPlayers.Remove(player);
+			RestorePhysicsState(player);
+			if (mapEditorObject != null)
+			{
+				UpdateSerializedPosition(mapEditorObject, mapEditorObject.transform.position);
+				mapEditorObject.UpdateObjectAndCopies();
+			}
 		}
+	}
+
+	private static void MoveGrabbedObject(MapEditorObject mapEditorObject, Vector3 worldPosition)
+	{
+		mapEditorObject.transform.position = worldPosition;
+		UpdateSerializedPosition(mapEditorObject, worldPosition);
+		if (mapEditorObject.Base is SerializableDoor)
+			mapEditorObject.Base.SpawnOrUpdateObject(mapEditorObject.Room, mapEditorObject.gameObject);
+
+		Physics.SyncTransforms();
+	}
+
+	private static void UpdateSerializedPosition(MapEditorObject mapEditorObject, Vector3 worldPosition)
+	{
+		Room room = mapEditorObject.Room;
+		mapEditorObject.Base.Position = room.Name == MapGeneration.RoomName.Outside
+			? worldPosition
+			: room.Transform.InverseTransformPoint(worldPosition);
 	}
 
 	/// <summary>
 	/// The <see cref="Dictionary{TKey, TValue}"/> which contains all <see cref="Player"/> and <see cref="CoroutineHandle"/> pairs.
 	/// </summary>
 	private static readonly Dictionary<Player, CoroutineHandle> GrabbingPlayers = [];
+	private static readonly Dictionary<Player, GrabPhysicsState> PhysicsStates = [];
+
+	private static void DisablePhysicsState(Player player, MapEditorObject mapEditorObject)
+	{
+		RestorePhysicsState(player);
+
+		var colliders = mapEditorObject.GetComponentsInChildren<Collider>(true);
+		var rigidbodies = mapEditorObject.GetComponentsInChildren<Rigidbody>(true);
+
+		var state = new GrabPhysicsState(
+			colliders.Select(c => new ColliderState(c, c.enabled)).ToArray(),
+			rigidbodies.Select(r => new RigidbodyState(r, r.isKinematic, r.detectCollisions)).ToArray());
+
+		foreach (Collider collider in colliders)
+			collider.enabled = false;
+
+		foreach (Rigidbody rigidbody in rigidbodies)
+		{
+			rigidbody.isKinematic = true;
+			rigidbody.detectCollisions = false;
+		}
+
+		PhysicsStates[player] = state;
+		Physics.SyncTransforms();
+	}
+
+	private static void RestorePhysicsState(Player player)
+	{
+		if (!PhysicsStates.TryGetValue(player, out GrabPhysicsState state))
+			return;
+
+		foreach (ColliderState colliderState in state.Colliders)
+		{
+			if (colliderState.Collider != null)
+				colliderState.Collider.enabled = colliderState.Enabled;
+		}
+
+		foreach (RigidbodyState rigidbodyState in state.Rigidbodies)
+		{
+			if (rigidbodyState.Rigidbody != null)
+			{
+				rigidbodyState.Rigidbody.isKinematic = rigidbodyState.IsKinematic;
+				rigidbodyState.Rigidbody.detectCollisions = rigidbodyState.DetectCollisions;
+			}
+		}
+
+		PhysicsStates.Remove(player);
+		Physics.SyncTransforms();
+	}
+
+	private readonly struct GrabPhysicsState
+	{
+		public GrabPhysicsState(ColliderState[] colliders, RigidbodyState[] rigidbodies)
+		{
+			Colliders = colliders;
+			Rigidbodies = rigidbodies;
+		}
+
+		public ColliderState[] Colliders { get; }
+
+		public RigidbodyState[] Rigidbodies { get; }
+	}
+
+	private readonly struct ColliderState
+	{
+		public ColliderState(Collider collider, bool enabled)
+		{
+			Collider = collider;
+			Enabled = enabled;
+		}
+
+		public Collider Collider { get; }
+
+		public bool Enabled { get; }
+	}
+
+	private readonly struct RigidbodyState
+	{
+		public RigidbodyState(Rigidbody rigidbody, bool isKinematic, bool detectCollisions)
+		{
+			Rigidbody = rigidbody;
+			IsKinematic = isKinematic;
+			DetectCollisions = detectCollisions;
+		}
+
+		public Rigidbody Rigidbody { get; }
+
+		public bool IsKinematic { get; }
+
+		public bool DetectCollisions { get; }
+	}
 }

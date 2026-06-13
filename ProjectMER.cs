@@ -8,6 +8,7 @@ using MEC;
 using ProjectMER.Configs;
 using ProjectMER.Events.Handlers.Internal;
 using ProjectMER.Features;
+using ProjectMER.Features.Extensions;
 
 namespace ProjectMER;
 
@@ -73,6 +74,8 @@ public class ProjectMER : Plugin<Config>
 		CustomHandlersManager.RegisterEventsHandler(ToolGunEventsHandler);
 		CustomHandlersManager.RegisterEventsHandler(AcionOnEventHandlers);
 		CustomHandlersManager.RegisterEventsHandler(PickupEventsHandler);
+
+		Timing.CallDelayed(5f, ExiledRoomTypeResolver.TryInitialize);
 
 		_harmony = new Harmony($"michal78900.mapEditorReborn-{DateTime.Now.Ticks}");
 		_harmony.PatchAll();

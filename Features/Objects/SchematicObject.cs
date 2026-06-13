@@ -1,7 +1,9 @@
 using AdminToys;
 using Mirror;
 using ProjectMER.Events.Handlers;
+using ProjectMER.Features;
 using ProjectMER.Features.Enums;
+using ProjectMER.Features.Serializable;
 using ProjectMER.Features.Serializable.Schematics;
 using UnityEngine;
 using Utf8Json;
@@ -140,6 +142,8 @@ public class SchematicObject : MonoBehaviour
         AddRigidbodies();
         AddTeleports();
         AddTriggerPoints();
+        AddObjectPrefabs();
+        AddDoors();
         AddAnimators();
 
         Schematic.OnSchematicSpawned(new(this, Name));
@@ -277,6 +281,60 @@ public class SchematicObject : MonoBehaviour
             triggerPointComponent.Schematic = this;
 
             ObjectFromId[triggerPointData.ObjectId] = triggerPointGo.transform;
+        }
+    }
+
+    private void AddObjectPrefabs()
+    {
+        string objectPrefabPath = Path.Combine(DirectoryPath, $"{Name}-ObjectPrefabs.json");
+        if (!File.Exists(objectPrefabPath))
+            return;
+
+        List<SchematicObjectPrefabData> objectPrefabDataList = JsonSerializer.Deserialize<List<SchematicObjectPrefabData>>(File.ReadAllText(objectPrefabPath));
+
+        foreach (SchematicObjectPrefabData objectPrefabData in objectPrefabDataList)
+        {
+            GameObject objectPrefabGo = new GameObject(objectPrefabData.Name);
+
+            Transform parentTransform = ObjectFromId.TryGetValue(objectPrefabData.ParentId, out Transform parentTf)
+                ? parentTf
+                : transform;
+
+            objectPrefabGo.transform.SetParent(parentTransform);
+            objectPrefabGo.transform.SetLocalPositionAndRotation(objectPrefabData.Position, Quaternion.Euler(objectPrefabData.Rotation));
+            objectPrefabGo.transform.localScale = objectPrefabData.Scale;
+
+            SchematicObjectPrefabObject objectPrefabComponent = objectPrefabGo.AddComponent<SchematicObjectPrefabObject>();
+            objectPrefabComponent.Init(objectPrefabData, this);
+
+            ObjectFromId[objectPrefabData.ObjectId] = objectPrefabGo.transform;
+        }
+    }
+
+    private void AddDoors()
+    {
+        string doorPath = Path.Combine(DirectoryPath, $"{Name}-Doors.json");
+        if (!File.Exists(doorPath))
+            return;
+
+        List<SchematicDoorData> doorDataList = YamlParser.Deserializer.Deserialize<List<SchematicDoorData>>(File.ReadAllText(doorPath));
+
+        foreach (SchematicDoorData doorData in doorDataList)
+        {
+            GameObject doorMarkerGo = new GameObject(doorData.Name);
+
+            Transform parentTransform = ObjectFromId.TryGetValue(doorData.ParentId, out Transform parentTf)
+                ? parentTf
+                : transform;
+
+            doorMarkerGo.transform.SetParent(parentTransform);
+            doorMarkerGo.transform.SetLocalPositionAndRotation(doorData.Position, Quaternion.Euler(doorData.Rotation));
+            doorMarkerGo.transform.localScale = doorData.Scale;
+
+            SchematicDoorObject doorComponent = doorMarkerGo.AddComponent<SchematicDoorObject>();
+            doorComponent.Init(doorData, this);
+
+            ObjectFromId[doorData.ObjectId] = doorMarkerGo.transform;
         }
     }
 

@@ -18,4 +18,5 @@ public enum ToolGunObjectType
 	Interactable = 13,
 	Waypoint = 14,
 	CustomTriggerPoint = 15,
+	ObjectPrefabMarker = 16,
 }

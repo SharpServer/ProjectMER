@@ -19,6 +19,7 @@ public class GenericEventsHandler : CustomEventsHandler
 		ToolGunHandler.PlayerSelectedObjectDict.Clear();
 		PickupEventsHandler.ButtonPickups.Clear();
 		PickupEventsHandler.PickupUsesLeft.Clear();
+		PickupEventsHandler.CustomItemPickupUses.Clear();
 
 		CullingManager.Start();
 	}

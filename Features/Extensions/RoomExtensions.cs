@@ -17,20 +17,20 @@ public static class RoomExtensions
 {
 	public static Room GetRoomAtPosition(Vector3 position) => Room.TryGetRoomAtPosition(position, out Room? room) ? room : Room.List.First(x => x.Base != null && x.Name == RoomName.Outside);
 
-	public static string GetRoomStringId(this Room room) => $"{room.FindRoomType()}";
+	public static string GetRoomStringId(this Room room) => room.Name == RoomName.Outside ? nameof(RoomType.Surface) : room.FindRoomTypeName();
 
 	public static List<Room> GetRooms(this SerializableObject serializableObject)
 	{
-		if (!Enum.TryParse(serializableObject.Room, true, out RoomType roomType) || roomType == RoomType.Unknown)
+		if (IsOutsideRoomId(serializableObject.Room))
 			return ListPool<Room>.Shared.Rent(Room.List.Where(x => x.Base != null && x.Name == RoomName.Outside));
 
-		return ListPool<Room>.Shared.Rent(Room.List.Where(x => x.Base != null && x.FindRoomType() == roomType));
+		return ListPool<Room>.Shared.Rent(Room.List.Where(x => x.Base != null && x.FindRoomTypeName().Equals(serializableObject.Room, StringComparison.OrdinalIgnoreCase)));
 	}
 
 	public static int GetRoomIndex(this Room room)
 	{
-		RoomType roomType = room.FindRoomType();
-		List<Room> list = ListPool<Room>.Shared.Rent(Room.List.Where(x => x.Base != null && x.FindRoomType() == roomType));
+		string roomType = room.FindRoomTypeName();
+		List<Room> list = ListPool<Room>.Shared.Rent(Room.List.Where(x => x.Base != null && x.FindRoomTypeName() == roomType));
 		int index = list.IndexOf(room);
 		ListPool<Room>.Shared.Return(list);
 		return index;
@@ -57,6 +57,34 @@ public static class RoomExtensions
 	/// Equivalent to Exiled's FindType method.
 	/// </summary>
 	public static RoomType FindRoomType(this Room room)
+	{
+		return Enum.TryParse(room.FindRoomTypeName(), true, out RoomType roomType)
+			? roomType
+			: RoomType.Unknown;
+	}
+
+	public static string FindRoomTypeName(this Room room)
+	{
+		if (room.Name == RoomName.Outside)
+			return nameof(RoomType.Surface);
+
+		if (ExiledRoomTypeResolver.TryGetRoomTypeName(room, out string exiledRoomType))
+			return exiledRoomType;
+
+		return room.FindFallbackRoomType().ToString();
+	}
+
+	private static bool IsOutsideRoomId(string? roomId)
+	{
+		if (roomId == null || roomId.Trim().Length == 0)
+			return true;
+
+		return roomId.Equals(nameof(RoomType.Unknown), StringComparison.OrdinalIgnoreCase) ||
+		       roomId.Equals(nameof(RoomType.Surface), StringComparison.OrdinalIgnoreCase) ||
+		       roomId.Equals("Outside", StringComparison.OrdinalIgnoreCase);
+	}
+
+	private static RoomType FindFallbackRoomType(this Room room)
 	{
 		if (room.Base == null)
 			return RoomType.Unknown;

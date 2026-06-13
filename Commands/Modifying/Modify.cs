@@ -89,7 +89,9 @@ public class Modify : ICommand
 		}
 
 		bool result;
-		if (typeof(ICollection).IsAssignableFrom(foundProperty.PropertyType))
+		if (typeof(IDictionary).IsAssignableFrom(foundProperty.PropertyType))
+			result = HandleDictionary(out response);
+		else if (typeof(ICollection).IsAssignableFrom(foundProperty.PropertyType))
 			result = HandleCollection(out response);
 		else if (foundProperty.PropertyType != typeof(string))
 			result = HandleNonString(out response);
@@ -210,6 +212,72 @@ public class Modify : ICommand
 								return false;
 							}
 						}
+						break;
+					}
+
+				default:
+					response = "Invalid arguments! Use add/remove.";
+					return false;
+			}
+
+			response = string.Empty;
+			return true;
+		}
+
+		bool HandleDictionary(out string response)
+		{
+			IDictionary dictionary = (IDictionary)foundProperty.GetValue(instance);
+			Type[] genericArguments = foundProperty.PropertyType.GetGenericArguments();
+			Type keyType = genericArguments[0];
+			Type valueType = genericArguments[1];
+
+			switch (arguments.At(1).ToLower())
+			{
+				case "a":
+				case "add":
+				case "set":
+					{
+						if ((arguments.Count - 2) % 2 != 0)
+						{
+							response = "Invalid arguments! Use key/value pairs.";
+							return false;
+						}
+
+						for (int i = 2; i < arguments.Count; i += 2)
+						{
+							try
+							{
+								object key = TypeDescriptor.GetConverter(keyType).ConvertFromInvariantString(arguments.At(i));
+								object value = TypeDescriptor.GetConverter(valueType).ConvertFromInvariantString(arguments.At(i + 1));
+								dictionary[key] = value;
+							}
+							catch (Exception)
+							{
+								response = $"\"{arguments.At(i)}\" or \"{arguments.At(i + 1)}\" is not a valid argument! The value should be a {keyType}/{valueType} pair.";
+								return false;
+							}
+						}
+
+						break;
+					}
+
+				case "rm":
+				case "remove":
+					{
+						for (int i = 2; i < arguments.Count; i++)
+						{
+							try
+							{
+								object key = TypeDescriptor.GetConverter(keyType).ConvertFromInvariantString(arguments.At(i));
+								dictionary.Remove(key);
+							}
+							catch (Exception)
+							{
+								response = $"\"{arguments.At(i)}\" is not a valid argument! The value should be a {keyType} type.";
+								return false;
+							}
+						}
+
 						break;
 					}
 

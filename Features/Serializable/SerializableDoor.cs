@@ -27,20 +27,22 @@ public class SerializableDoor : SerializableObject
 			doorVariant = GameObject.Instantiate(DoorPrefab);
 			if (doorVariant.TryGetComponent(out DoorRandomInitialStateExtension doorRandomInitialStateExtension))
 				GameObject.Destroy(doorRandomInitialStateExtension);
+
+			doorVariant.transform.SetPositionAndRotation(position, rotation);
+			doorVariant.transform.localScale = Scale;
+			_prevType = DoorType;
+			SetupDoor(doorVariant);
+			NetworkServer.Spawn(doorVariant.gameObject);
 		}
 		else
 		{
 			doorVariant = instance.GetComponent<DoorVariant>();
+			doorVariant.transform.SetPositionAndRotation(position, rotation);
+			doorVariant.transform.localScale = Scale;
+			_prevType = DoorType;
+			SetupDoor(doorVariant);
+			SendTransformUpdate(doorVariant);
 		}
-
-		doorVariant.transform.SetPositionAndRotation(position, rotation);
-		doorVariant.transform.localScale = Scale;
-
-		_prevType = DoorType;
-		SetupDoor(doorVariant);
-
-		NetworkServer.UnSpawn(doorVariant.gameObject);
-		NetworkServer.Spawn(doorVariant.gameObject);
 
 		return doorVariant.gameObject;
 	}
@@ -68,6 +70,26 @@ public class SerializableDoor : SerializableObject
 
 			return prefab;
 		}
+	}
+
+	private static void SendTransformUpdate(DoorVariant doorVariant)
+	{
+		if (!doorVariant.TryGetComponent(out NetworkIdentity identity) || identity.netId == 0)
+			return;
+
+		Transform transform = doorVariant.transform;
+		NetworkServer.SendToReadyObservers(identity, new SpawnMessage
+		{
+			netId = identity.netId,
+			isLocalPlayer = false,
+			isOwner = false,
+			sceneId = identity.sceneId,
+			assetId = identity.assetId,
+			position = transform.localPosition,
+			rotation = transform.localRotation,
+			scale = transform.localScale,
+			payload = default,
+		});
 	}
 
 	public override bool RequiresReloading => DoorType != _prevType || base.RequiresReloading;

@@ -16,6 +16,7 @@ public class SerializableItemSpawnpoint : SerializableObject, IIndicatorDefiniti
 	public ItemType ItemType { get; set; } = ItemType.Lantern;
 	public float Weight { get; set; } = -1;
 	public string AttachmentsCode { get; set; } = "-1";
+	public string CustomItemKey { get; set; } = string.Empty;
 	public uint NumberOfItems { get; set; } = 1;
 	public int NumberOfUses { get; set; } = 1;
 	public bool UseGravity { get; set; } = true;
@@ -35,20 +36,30 @@ public class SerializableItemSpawnpoint : SerializableObject, IIndicatorDefiniti
 			foreach (ItemPickupBase pickup in instance.GetComponentsInChildren<ItemPickupBase>())
 			{
 				PickupEventsHandler.PickupUsesLeft.Remove(pickup.Info.Serial);
+				PickupEventsHandler.CustomItemPickupUses.Remove(pickup.Info.Serial);
 				pickup.DestroySelf();
 			}
 		}
 
 		for (int i = 0; i < NumberOfItems; i++)
 		{
+			if (!string.IsNullOrWhiteSpace(CustomItemKey))
+			{
+				if (!ItemSpawnpointCustomItemRegistry.TrySpawn(CustomItemKey, this, position, rotation, itemSpawnPoint.transform, out ItemPickupBase? customPickup) ||
+				    customPickup == null)
+				{
+					Logger.Warn($"ItemSpawnpoint custom item '{CustomItemKey}' has no provider.");
+					continue;
+				}
+
+				ConfigurePickup(customPickup, itemSpawnPoint.transform);
+				PickupEventsHandler.CustomItemPickupUses[customPickup.Info.Serial] = new(CustomItemKey, NumberOfUses);
+				continue;
+			}
+
 			Pickup pickup = Pickup.Create(ItemType, position, rotation, Scale)!;
-
-			pickup.Transform.parent = itemSpawnPoint.transform;
-			if (Weight != -1)
-				pickup.Weight = Weight;
-
-			pickup.Rigidbody!.isKinematic = !UseGravity;
-			pickup.IsLocked = !CanBePickedUp;
+			if (pickup.Base != null)
+				ConfigurePickup(pickup.Base, itemSpawnPoint.transform);
 			PickupEventsHandler.PickupUsesLeft.Add(pickup.Serial, NumberOfUses);
 
 			pickup.Spawn();
@@ -67,6 +78,19 @@ public class SerializableItemSpawnpoint : SerializableObject, IIndicatorDefiniti
 
 		return itemSpawnPoint.gameObject;
 	}
+
+	private void ConfigurePickup(ItemPickupBase pickup, Transform parent)
+	{
+		pickup.transform.parent = parent;
+		if (Weight != -1)
+			pickup.Info.WeightKg = Weight;
+
+		if (pickup.TryGetComponent(out Rigidbody rigidbody))
+			rigidbody.isKinematic = !UseGravity;
+
+		pickup.Info.Locked = !CanBePickedUp;
+	}
+
 	public GameObject SpawnOrUpdateIndicator(Room room, GameObject? instance = null)
 	{
 		PrimitiveObjectToy cube;

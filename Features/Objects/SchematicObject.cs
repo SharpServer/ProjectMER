@@ -1,3 +1,6 @@
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using AdminToys;
 using Mirror;
 using ProjectMER.Events.Handlers;
@@ -30,10 +33,7 @@ public class SchematicObject : MonoBehaviour
     public Vector3 Position
     {
         get => transform.position;
-        set
-        {
-            transform.position = value;
-        }
+        set => transform.position = value;
     }
 
     /// <summary>
@@ -42,10 +42,7 @@ public class SchematicObject : MonoBehaviour
     public Quaternion Rotation
     {
         get => transform.rotation;
-        set
-        {
-            transform.rotation = value;
-        }
+        set => transform.rotation = value;
     }
 
     /// <summary>
@@ -63,10 +60,7 @@ public class SchematicObject : MonoBehaviour
     public Vector3 Scale
     {
         get => transform.localScale;
-        set
-        {
-            transform.localScale = value;
-        }
+        set => transform.localScale = value;
     }
 
     public IReadOnlyList<GameObject> AttachedBlocks
@@ -77,12 +71,12 @@ public class SchematicObject : MonoBehaviour
                 return _attachedBlocks;
 
             _attachedBlocks.Clear();
-            foreach (Transform transform in GetComponentsInChildren<Transform>())
+            foreach (Transform tf in GetComponentsInChildren<Transform>())
             {
-                if (transform == this.transform)
+                if (tf == transform)
                     continue;
 
-                _attachedBlocks.Add(transform.gameObject);
+                _attachedBlocks.Add(tf.gameObject);
             }
 
             return _attachedBlocks;
@@ -126,6 +120,9 @@ public class SchematicObject : MonoBehaviour
     }
 
     public AnimationController AnimationController => AnimationController.Get(this);
+
+    // Destroy 冪等化用
+    private bool _isCleanedUp;
 
     public SchematicObject Init(SchematicObjectDataList data)
     {
@@ -188,7 +185,10 @@ public class SchematicObject : MonoBehaviour
         if (string.IsNullOrEmpty(animatorName))
             return false;
 
-        Object? animatorObject = AssetBundle.GetAllLoadedAssetBundles().FirstOrDefault(x => x.mainAsset.name == animatorName)?.LoadAllAssets().First(x => x is RuntimeAnimatorController);
+        Object? animatorObject = AssetBundle.GetAllLoadedAssetBundles()
+            .FirstOrDefault(x => x.mainAsset.name == animatorName)?
+            .LoadAllAssets()
+            .First(x => x is RuntimeAnimatorController);
 
         if (animatorObject is null)
         {
@@ -200,7 +200,9 @@ public class SchematicObject : MonoBehaviour
                 return false;
             }
 
-            animatorObject = AssetBundle.LoadFromFile(path).LoadAllAssets().First(x => x is RuntimeAnimatorController);
+            animatorObject = AssetBundle.LoadFromFile(path)
+                .LoadAllAssets()
+                .First(x => x is RuntimeAnimatorController);
         }
 
         animatorController = (RuntimeAnimatorController)animatorObject;
@@ -228,7 +230,8 @@ public class SchematicObject : MonoBehaviour
         if (!File.Exists(teleportPath))
             return;
 
-        List<SchematicTeleportData> teleportDataList = JsonSerializer.Deserialize<List<SchematicTeleportData>>(File.ReadAllText(teleportPath));
+        List<SchematicTeleportData> teleportDataList =
+            JsonSerializer.Deserialize<List<SchematicTeleportData>>(File.ReadAllText(teleportPath));
 
         foreach (SchematicTeleportData teleportData in teleportDataList)
         {
@@ -261,7 +264,8 @@ public class SchematicObject : MonoBehaviour
         if (!File.Exists(triggerPointPath))
             return;
 
-        List<SchematicTriggerPointData> triggerPointDataList = JsonSerializer.Deserialize<List<SchematicTriggerPointData>>(File.ReadAllText(triggerPointPath));
+        List<SchematicTriggerPointData> triggerPointDataList =
+            JsonSerializer.Deserialize<List<SchematicTriggerPointData>>(File.ReadAllText(triggerPointPath));
 
         foreach (SchematicTriggerPointData triggerPointData in triggerPointDataList)
         {
@@ -290,7 +294,8 @@ public class SchematicObject : MonoBehaviour
         if (!File.Exists(objectPrefabPath))
             return;
 
-        List<SchematicObjectPrefabData> objectPrefabDataList = JsonSerializer.Deserialize<List<SchematicObjectPrefabData>>(File.ReadAllText(objectPrefabPath));
+        List<SchematicObjectPrefabData> objectPrefabDataList =
+            JsonSerializer.Deserialize<List<SchematicObjectPrefabData>>(File.ReadAllText(objectPrefabPath));
 
         foreach (SchematicObjectPrefabData objectPrefabData in objectPrefabDataList)
         {
@@ -317,10 +322,12 @@ public class SchematicObject : MonoBehaviour
         if (!File.Exists(doorPath))
             return;
 
-        List<SchematicDoorData> doorDataList = YamlParser.Deserializer.Deserialize<List<SchematicDoorData>>(File.ReadAllText(doorPath));
+        List<SchematicDoorJsonData> doorDataList =
+            JsonSerializer.Deserialize<List<SchematicDoorJsonData>>(File.ReadAllText(doorPath));
 
-        foreach (SchematicDoorData doorData in doorDataList)
+        foreach (SchematicDoorJsonData jsonData in doorDataList)
         {
+            SchematicDoorData doorData = jsonData.ToDoorData();
             GameObject doorMarkerGo = new GameObject(doorData.Name);
 
             Transform parentTransform = ObjectFromId.TryGetValue(doorData.ParentId, out Transform parentTf)
@@ -345,13 +352,14 @@ public class SchematicObject : MonoBehaviour
         if (!File.Exists(rigidbodyPath))
             return false;
 
-        foreach (KeyValuePair<int, SerializableRigidbody> dict in JsonSerializer.Deserialize<Dictionary<int, SerializableRigidbody>>(File.ReadAllText(rigidbodyPath)))
+        foreach (KeyValuePair<int, SerializableRigidbody> dict in
+                 JsonSerializer.Deserialize<Dictionary<int, SerializableRigidbody>>(File.ReadAllText(rigidbodyPath)))
         {
-            if (!ObjectFromId.TryGetValue(dict.Key, out Transform transform))
+            if (!ObjectFromId.TryGetValue(dict.Key, out Transform tf))
                 continue;
 
-            if (!transform.gameObject.TryGetComponent(out Rigidbody rigidbody))
-                rigidbody = transform.gameObject.AddComponent<Rigidbody>();
+            if (!tf.gameObject.TryGetComponent(out Rigidbody rigidbody))
+                rigidbody = tf.gameObject.AddComponent<Rigidbody>();
 
             rigidbody.isKinematic = dict.Value.IsKinematic;
             rigidbody.useGravity = dict.Value.UseGravity;
@@ -364,14 +372,45 @@ public class SchematicObject : MonoBehaviour
         return hasRigidbodies;
     }
 
+    // 外部から呼ばれる Destroy。冪等。
+    public void Destroy()
+    {
+        DestroyInternal();
+    }
 
-    public void Destroy() => Destroy(gameObject);
+    private void DestroyInternal()
+    {
+        if (_isCleanedUp)
+            return;
+
+        _isCleanedUp = true;
+
+        // AnimationController の辞書から削除
+        AnimationController.Dictionary.Remove(this);
+
+        // ネットワークオブジェクト破棄
+        if (NetworkServer.active && gameObject != null)
+        {
+            var netId = gameObject.GetComponent<NetworkIdentity>();
+            if (netId != null && netId.isServer)
+            {
+                NetworkServer.Destroy(gameObject);
+            }
+        }
+
+        // イベント発火
+        Schematic.OnSchematicDestroyed(new(this, Name));
+
+        // GameObject 自体の Destroy 予約
+        if (this != null && gameObject != null)
+            Object.Destroy(gameObject);
+    }
 
     private void OnDestroy()
     {
-        AnimationController.Dictionary.Remove(this);
-        NetworkServer.Destroy(gameObject);
-        Schematic.OnSchematicDestroyed(new(this, Name));
+        // Unity が直接 Destroy したときにも Cleanup するが、二重実行は避ける
+        if (!_isCleanedUp)
+            DestroyInternal();
     }
 
     internal Dictionary<int, Transform> ObjectFromId = [];

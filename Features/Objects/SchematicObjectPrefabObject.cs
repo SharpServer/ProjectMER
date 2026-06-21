@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using ProjectMER.Features.Serializable.Schematics;
 using UnityEngine;
 

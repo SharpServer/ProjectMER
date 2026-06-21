@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using InventorySystem.Items;
 using InventorySystem.Items.Firearms.Attachments;
 using InventorySystem.Items.Firearms.Modules;

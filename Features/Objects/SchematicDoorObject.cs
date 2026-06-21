@@ -16,16 +16,15 @@ public class SchematicDoorObject : MonoBehaviour
     private CoroutineHandle _syncCoroutine;
     private Vector3 _lastPosition;
     private Quaternion _lastRotation;
-    private Vector3 _lastScale;
 
     internal void Init(SchematicDoorData data, SchematicObject schematic)
     {
         Schematic = schematic;
         _door = new SerializableDoor
         {
-            Position = transform.position,
-            Rotation = transform.rotation.eulerAngles,
-            Scale = transform.lossyScale,
+            Position = Vector3.zero,
+            Rotation = Vector3.zero,
+            Scale = Vector3.one,
             DoorType = data.DoorType,
             IsOpen = data.IsOpen,
             IsLocked = data.IsLocked,
@@ -35,9 +34,9 @@ public class SchematicDoorObject : MonoBehaviour
 
         DoorGameObject = _door.SpawnOrUpdateObject();
         DoorGameObject.name = data.Name;
+        RespawnDoorAtMarker();
         _lastPosition = transform.position;
         _lastRotation = transform.rotation;
-        _lastScale = transform.lossyScale;
         _syncCoroutine = Timing.RunCoroutine(SyncCoroutine());
     }
 
@@ -57,24 +56,29 @@ public class SchematicDoorObject : MonoBehaviour
 
         Vector3 position = transform.position;
         Quaternion rotation = transform.rotation;
-        Vector3 scale = transform.lossyScale;
 
         if (!force &&
             (position - _lastPosition).sqrMagnitude < 0.0001f &&
-            Quaternion.Angle(rotation, _lastRotation) < 0.1f &&
-            (scale - _lastScale).sqrMagnitude < 0.0001f)
+            Quaternion.Angle(rotation, _lastRotation) < 0.1f)
         {
             return;
         }
 
         _lastPosition = position;
         _lastRotation = rotation;
-        _lastScale = scale;
 
-        _door.Position = position;
-        _door.Rotation = rotation.eulerAngles;
-        _door.Scale = scale;
-        _door.SpawnOrUpdateObject(null, DoorGameObject);
+        RespawnDoorAtMarker();
+    }
+
+    private void RespawnDoorAtMarker()
+    {
+        if (DoorGameObject == null)
+            return;
+
+        NetworkServer.UnSpawn(DoorGameObject);
+        DoorGameObject.transform.SetPositionAndRotation(transform.position, transform.rotation);
+        DoorGameObject.transform.localScale = Vector3.one;
+        NetworkServer.Spawn(DoorGameObject);
     }
 
     private void OnDestroy()

@@ -1,3 +1,4 @@
+using System;
 using CommandSystem;
 using LabApi.Features.Permissions;
 using LabApi.Features.Wrappers;

@@ -19,4 +19,5 @@ public enum ToolGunObjectType
 	Waypoint = 14,
 	CustomTriggerPoint = 15,
 	ObjectPrefabMarker = 16,
+	PrefabMarker = 17,
 }

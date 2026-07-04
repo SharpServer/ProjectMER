@@ -36,6 +36,7 @@ public class ToolGunItem
 		{ ToolGunObjectType.Waypoint, typeof(SerializableWaypoint) },
 		{ ToolGunObjectType.CustomTriggerPoint, typeof(SerializableCustomTriggerPoint) },
 		{ ToolGunObjectType.ObjectPrefabMarker, typeof(SerializableObjectPrefabMarker) },
+		{ ToolGunObjectType.PrefabMarker, typeof(SerializablePrefabMarker) },
 	};
 
 	private ToolGunObjectType _selectedObjectToSpawn;

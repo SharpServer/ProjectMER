@@ -15,7 +15,12 @@ public static class CullingExtensions
 	/// <summary>
 	/// Gets a NetworkServer.SendSpawnMessage's <see cref="MethodInfo"/>.
 	/// </summary>
-	private static MethodInfo SendSpawnMessage => _sendSpawnMessage ??= typeof(NetworkServer).GetMethod("SendSpawnMessage", BindingFlags.NonPublic | BindingFlags.Static);
+	private static MethodInfo SendSpawnMessage => _sendSpawnMessage ??= typeof(NetworkServer).GetMethod(
+		"SendSpawnMessage",
+		BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+		null,
+		[typeof(NetworkIdentity), typeof(NetworkConnection)],
+		null) ?? throw new MissingMethodException(typeof(NetworkServer).FullName, "SendSpawnMessage");
 
 	/// <summary>
 	/// Spawns the given <paramref name="schematic"/> for the specified <paramref name="player"/>.

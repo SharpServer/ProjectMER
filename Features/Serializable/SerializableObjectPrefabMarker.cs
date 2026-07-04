@@ -12,6 +12,8 @@ public class SerializableObjectPrefabMarker : SerializableObject, IIndicatorDefi
 {
     public string PrefabType { get; set; } = string.Empty;
 
+    public string Tag { get; set; } = string.Empty;
+
     public int MaxRooms { get; set; } = 1;
 
     public bool AutoDestroyEnabled { get; set; }
@@ -33,11 +35,13 @@ public class SerializableObjectPrefabMarker : SerializableObject, IIndicatorDefi
         SchematicObjectPrefabObject component = marker.GetComponent<SchematicObjectPrefabObject>() ??
                                                 marker.AddComponent<SchematicObjectPrefabObject>();
         component.PrefabType = PrefabType;
+        component.Tag = Tag;
         component.MaxRooms = MaxRooms <= 0 ? 1 : MaxRooms;
         component.AutoDestroyEnabled = AutoDestroyEnabled;
         component.AutoDestroyTime = AutoDestroyTime;
         component.Options = Options ?? [];
         component.Schematic = null;
+        component.NotifySpawned();
 
         return marker;
     }

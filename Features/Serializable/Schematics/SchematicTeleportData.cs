@@ -24,7 +24,7 @@ public class SchematicTeleportData
 
     public List<string> Targets { get; set; } = [];
 
-    public float Cooldown { get; set; }
+    public float Cooldown { get; set; } = 5f;
 
     public Vector3 TriggerScale { get; set; } = Vector3.one;
 }

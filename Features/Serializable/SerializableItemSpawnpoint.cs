@@ -6,6 +6,7 @@ using MEC;
 using ProjectMER.Events.Handlers.Internal;
 using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Interfaces;
+using ProjectMER.Features.Objects;
 using UnityEngine;
 using PrimitiveObjectToy = AdminToys.PrimitiveObjectToy;
 
@@ -22,6 +23,22 @@ public class SerializableItemSpawnpoint : SerializableObject, IIndicatorDefiniti
 	public bool UseGravity { get; set; } = true;
 	public bool CanBePickedUp { get; set; } = true;
 
+	/// <summary>
+	/// 統一アイテム指定。カスタムアイテム優先で解決し、無ければ ItemType として解釈する。
+	/// "(ItemType)Medkit" / "(CItem)MyItem" で種類を強制できる。
+	/// 空の場合は旧来の CustomItemKey / ItemType プロパティが使われる。
+	/// </summary>
+	public string Item { get; set; } = string.Empty;
+
+	/// <summary>プラグイン側から検索するためのタグ。</summary>
+	public string Tag { get; set; } = string.Empty;
+
+	/// <summary>
+	/// true の場合、生成時にはアイテムをスポーンしない。
+	/// プラグイン側から ItemSpawnpointObject.SpawnItems() を呼んだときのみ出現する。
+	/// </summary>
+	public bool IsTriggerSpawn { get; set; } = false;
+
 	public override GameObject? SpawnOrUpdateObject(Room? room = null, GameObject? instance = null)
 	{
 		GameObject itemSpawnPoint = instance ?? new GameObject("ItemSpawnpoint");
@@ -31,64 +48,15 @@ public class SerializableItemSpawnpoint : SerializableObject, IIndicatorDefiniti
 
 		itemSpawnPoint.transform.SetPositionAndRotation(position, rotation);
 
-		if (instance != null)
-		{
-			foreach (ItemPickupBase pickup in instance.GetComponentsInChildren<ItemPickupBase>())
-			{
-				PickupEventsHandler.PickupUsesLeft.Remove(pickup.Info.Serial);
-				PickupEventsHandler.CustomItemPickupUses.Remove(pickup.Info.Serial);
-				pickup.DestroySelf();
-			}
-		}
+		ItemSpawnpointObject spawnpointObject = itemSpawnPoint.GetComponent<ItemSpawnpointObject>() ??
+		                                        itemSpawnPoint.AddComponent<ItemSpawnpointObject>();
+		spawnpointObject.Init(this);
 
-		for (int i = 0; i < NumberOfItems; i++)
-		{
-			if (!string.IsNullOrWhiteSpace(CustomItemKey))
-			{
-				if (!ItemSpawnpointCustomItemRegistry.TrySpawn(CustomItemKey, this, position, rotation, itemSpawnPoint.transform, out ItemPickupBase? customPickup) ||
-				    customPickup == null)
-				{
-					Logger.Warn($"ItemSpawnpoint custom item '{CustomItemKey}' has no provider.");
-					continue;
-				}
-
-				ConfigurePickup(customPickup, itemSpawnPoint.transform);
-				PickupEventsHandler.CustomItemPickupUses[customPickup.Info.Serial] = new(CustomItemKey, NumberOfUses);
-				continue;
-			}
-
-			Pickup pickup = Pickup.Create(ItemType, position, rotation, Scale)!;
-			if (pickup.Base != null)
-				ConfigurePickup(pickup.Base, itemSpawnPoint.transform);
-			PickupEventsHandler.PickupUsesLeft.Add(pickup.Serial, NumberOfUses);
-
-			pickup.Spawn();
-
-			if (pickup is FirearmPickup firearmPickup)
-			{
-				Timing.CallDelayed(0.01f, () =>
-				{
-					firearmPickup.Base.OnDistributed();
-					firearmPickup.AttachmentCode = uint.TryParse(AttachmentsCode, out uint attachmentsCode) ? attachmentsCode : AttachmentsUtils.GetRandomAttachmentsCode(firearmPickup.Type);
-					if (firearmPickup.Base.Template.TryGetModule(out MagazineModule magazineModule))
-						magazineModule.ServerResyncData();
-				});
-			}
-		}
+		spawnpointObject.ClearItems();
+		if (!IsTriggerSpawn)
+			spawnpointObject.SpawnItems(clearExisting: false);
 
 		return itemSpawnPoint.gameObject;
-	}
-
-	private void ConfigurePickup(ItemPickupBase pickup, Transform parent)
-	{
-		pickup.transform.parent = parent;
-		if (Weight != -1)
-			pickup.Info.WeightKg = Weight;
-
-		if (pickup.TryGetComponent(out Rigidbody rigidbody))
-			rigidbody.isKinematic = !UseGravity;
-
-		pickup.Info.Locked = !CanBePickedUp;
 	}
 
 	public GameObject SpawnOrUpdateIndicator(Room room, GameObject? instance = null)

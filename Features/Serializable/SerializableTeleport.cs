@@ -30,8 +30,7 @@ public class SerializableTeleport : SerializableObject, IIndicatorDefinition
 		if (!gameObject.TryGetComponent(out BoxCollider boxCollider))
 			boxCollider = gameObject.AddComponent<BoxCollider>();
 
-		boxCollider.isTrigger = true;
-		boxCollider.size = Scale;
+		TeleportHelper.ConfigureTrigger(boxCollider, Scale);
 
 		return gameObject;
 	}

@@ -172,6 +172,12 @@ public class Modify : ICommand
 
 		bool HandleCollection(out string response)
 		{
+			if (arguments.Count < 2)
+			{
+				response = "Invalid arguments! Use add/remove.";
+				return false;
+			}
+
 			object listInstance = foundProperty.GetValue(instance);
 			Type listType = foundProperty.PropertyType.GetInterfaces().First(x => x.IsGenericType).GetGenericArguments()[0];
 
@@ -226,6 +232,12 @@ public class Modify : ICommand
 
 		bool HandleDictionary(out string response)
 		{
+			if (arguments.Count < 2)
+			{
+				response = "Invalid arguments! Use add/set/remove.";
+				return false;
+			}
+
 			IDictionary dictionary = (IDictionary)foundProperty.GetValue(instance);
 			Type[] genericArguments = foundProperty.PropertyType.GetGenericArguments();
 			Type keyType = genericArguments[0];

@@ -1,6 +1,4 @@
-using System;
 using System.Collections.Generic;
-using LabApi.Features.Wrappers;
 using UnityEngine;
 
 namespace ProjectMER.Features.Objects;
@@ -10,7 +8,7 @@ namespace ProjectMER.Features.Objects;
 /// Unlike <see cref="TeleportObject"/> which depends on <see cref="MapEditorObject"/>,
 /// this stores teleport data directly for use in compiled schematics.
 /// </summary>
-public class SchematicTeleportObject : MonoBehaviour
+public class SchematicTeleportObject : MonoBehaviour, ITeleporter
 {
     public string Id;
 
@@ -18,42 +16,51 @@ public class SchematicTeleportObject : MonoBehaviour
 
     public float Cooldown = 5f;
 
-    public DateTime NextTimeUse;
+    private BoxCollider? _trigger;
+    private readonly HashSet<ReferenceHub> _ignoredPlayers = [];
+
+    Transform ITeleporter.Transform => transform;
+    BoxCollider? ITeleporter.Trigger => _trigger;
+    float ITeleporter.TeleportCooldown => Cooldown;
+    HashSet<ReferenceHub> ITeleporter.IgnoredPlayers => _ignoredPlayers;
+    ITeleporter? ITeleporter.GetTarget() => GetRandomTarget();
+
+    private void Awake()
+    {
+        TryGetComponent(out _trigger);
+    }
+
+    private void FixedUpdate()
+    {
+        TeleportHelper.Tick(this);
+    }
 
     public SchematicTeleportObject? GetRandomTarget()
     {
-        if (Targets.Count == 0)
+        if (Targets is not { Count: > 0 } targets)
             return null;
 
-        string targetId = Targets[UnityEngine.Random.Range(0, Targets.Count)];
+        SchematicTeleportObject[] teleportObjects = FindObjectsByType<SchematicTeleportObject>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+        int startIndex = UnityEngine.Random.Range(0, targets.Count);
 
-        foreach (SchematicTeleportObject teleportObject in FindObjectsByType<SchematicTeleportObject>(FindObjectsInactive.Exclude, FindObjectsSortMode.None))
+        for (int i = 0; i < targets.Count; i++)
         {
-            if (teleportObject.Id == targetId)
+            string targetId = targets[(startIndex + i) % targets.Count];
+
+            foreach (SchematicTeleportObject teleportObject in teleportObjects)
+            {
+                if (teleportObject == this || teleportObject.Id != targetId)
+                    continue;
+
                 return teleportObject;
+            }
         }
 
         return null;
     }
 
-    public void OnTriggerEnter(Collider other)
+    private void OnDestroy()
     {
-        Player? player = Player.Get(other.gameObject);
-        if (player is null)
-            return;
-
-        if (NextTimeUse > DateTime.Now)
-            return;
-
-        SchematicTeleportObject? target = GetRandomTarget();
-        if (target == null)
-            return;
-
-        DateTime dateTime = DateTime.Now.AddSeconds(Cooldown);
-        NextTimeUse = dateTime;
-        target.NextTimeUse = dateTime;
-
-        player.Position = target.gameObject.transform.position;
-        player.LookRotation = target.gameObject.transform.eulerAngles;
+        TeleportHelper.ClearArrivalReservation(transform);
     }
 }

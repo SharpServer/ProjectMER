@@ -26,6 +26,7 @@
 	  <Reference Include="CommandSystem.Core" HintPath="$(SL_REFERENCES)\CommandSystem.Core.dll" />
     <Reference Include="YamlDotNet" HintPath="$(SL_REFERENCES)\YamlDotNet.dll" />
     <Reference Include="NorthwoodLib" HintPath="$(SL_REFERENCES)\NorthwoodLib.dll" />
+    <Reference Include="Pooling" HintPath="$(SL_REFERENCES)\Pooling.dll" />
     <Reference Include="LabApi" HintPath="$(SL_REFERENCES)\LabApi.dll" />
     <Reference Include="HintServiceMeow" HintPath="$(SL_REFERENCES)\HintServiceMeow-LabAPI.dll" />
   </ItemGroup>

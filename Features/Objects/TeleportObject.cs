@@ -1,56 +1,72 @@
-using System;
-using LabApi.Features.Wrappers;
+using System.Collections.Generic;
 using ProjectMER.Features.Serializable;
 using UnityEngine;
 
 namespace ProjectMER.Features.Objects;
 
-public class TeleportObject : MonoBehaviour
+public class TeleportObject : MonoBehaviour, ITeleporter
 {
+	public SerializableTeleport Base = null!;
+	private MapEditorObject _mapEditorObject = null!;
+	private BoxCollider? _trigger;
+	private readonly HashSet<ReferenceHub> _ignoredPlayers = [];
+
+	Transform ITeleporter.Transform => transform;
+	BoxCollider? ITeleporter.Trigger => _trigger;
+	float ITeleporter.TeleportCooldown => Base.Cooldown;
+	HashSet<ReferenceHub> ITeleporter.IgnoredPlayers => _ignoredPlayers;
+	ITeleporter? ITeleporter.GetTarget() => GetRandomTarget();
+
 	private void Start()
 	{
-		_mapEditorObject = GetComponent<MapEditorObject>();
-		Base = (SerializableTeleport)_mapEditorObject.Base;
+		TryInitialize();
 	}
 
-	public SerializableTeleport Base;
-	private MapEditorObject _mapEditorObject;
-
-	public DateTime NextTimeUse;
+	private void FixedUpdate()
+	{
+		if (TryInitialize())
+			TeleportHelper.Tick(this);
+	}
 
 	public TeleportObject? GetRandomTarget()
 	{
-		string targetId = Base.Targets.RandomItem();
+		if (!TryInitialize() || Base.Targets is not { Count: > 0 } targets)
+			return null;
 
-		foreach (TeleportObject teleportObject in FindObjectsByType<TeleportObject>(FindObjectsInactive.Exclude, FindObjectsSortMode.None))
+		TeleportObject[] teleportObjects = FindObjectsByType<TeleportObject>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+		int startIndex = UnityEngine.Random.Range(0, targets.Count);
+
+		for (int i = 0; i < targets.Count; i++)
 		{
-			if (teleportObject._mapEditorObject.Id != targetId)
-				continue;
+			string targetId = targets[(startIndex + i) % targets.Count];
 
-			return teleportObject;
+			foreach (TeleportObject teleportObject in teleportObjects)
+			{
+				if (teleportObject == this || !teleportObject.TryInitialize() || teleportObject._mapEditorObject.Id != targetId)
+					continue;
+
+				return teleportObject;
+			}
 		}
 
 		return null;
 	}
 
-	public void OnTriggerEnter(Collider other)
+	private void OnDestroy()
 	{
-		Player? player = Player.Get(other.gameObject);
-		if (player is null)
-			return;
+		TeleportHelper.ClearArrivalReservation(transform);
+	}
 
-		if (NextTimeUse > DateTime.Now)
-			return;
+	private bool TryInitialize()
+	{
+		if (_mapEditorObject != null && Base != null)
+			return true;
 
-		TeleportObject? target = GetRandomTarget();
-		if (target == null)
-			return;
+		if (!TryGetComponent(out _mapEditorObject) || _mapEditorObject.Base is not SerializableTeleport serializableTeleport)
+			return false;
 
-		DateTime dateTime = DateTime.Now.AddSeconds(Base.Cooldown);
-		NextTimeUse = dateTime;
-		target.NextTimeUse = dateTime;
-
-		player.Position = target.gameObject.transform.position;
-		player.LookRotation = target.gameObject.transform.eulerAngles;
+		Base = serializableTeleport;
+		TryGetComponent(out _trigger);
+		return true;
 	}
 }

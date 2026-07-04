@@ -147,6 +147,37 @@ public class SchematicBlockData
 		if (Properties.TryGetValue("Chance", out object property) && UnityEngine.Random.Range(0, 101) > Convert.ToSingle(property))
 			return new("Empty Pickup");
 
+		string item = Properties.TryGetValue("Item", out object itemObj) ? itemObj?.ToString() ?? string.Empty : string.Empty;
+		string legacyCustomItem = Properties.TryGetValue("CustomItem", out object customObj) ? customObj?.ToString() ?? string.Empty : string.Empty;
+		bool triggerSpawn = Properties.TryGetValue("TriggerSpawn", out object triggerObj) && Convert.ToBoolean(triggerObj);
+
+		// 統一 Item 指定（または旧 CustomItem / TriggerSpawn）は、スキマティック配置完了後に
+		// CItem 優先で解決する遅延スポーナーへ委譲する。
+		if (!string.IsNullOrWhiteSpace(item) || !string.IsNullOrWhiteSpace(legacyCustomItem) || triggerSpawn)
+		{
+			ItemType fallbackItemType = Properties.TryGetValue("ItemType", out object legacyType)
+				? (ItemType)Convert.ToInt32(legacyType)
+				: ItemType.None;
+			int uses = Properties.TryGetValue("Uses", out object usesObj) ? Convert.ToInt32(usesObj) : 1;
+			string attachmentsCode = Properties.TryGetValue("AttachmentsCode", out object attachments)
+				? attachments?.ToString() ?? "-1"
+				: "-1";
+
+			GameObject placeholder = new("Pickup Spawner");
+			SchematicPickupSpawner spawner = placeholder.AddComponent<SchematicPickupSpawner>();
+			spawner.Init(
+				schematicObject,
+				item,
+				legacyCustomItem,
+				fallbackItemType,
+				uses,
+				locked: Properties.ContainsKey("Locked"),
+				attachmentsCode,
+				triggerSpawn);
+
+			return placeholder;
+		}
+
 		Pickup pickup = Pickup.Create((ItemType)Convert.ToInt32(Properties["ItemType"]), Vector3.zero)!;
 		if (Properties.ContainsKey("Locked"))
 			PickupEventsHandler.ButtonPickups.Add(pickup.Serial, schematicObject);

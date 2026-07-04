@@ -121,6 +121,111 @@ public class SchematicObject : MonoBehaviour
 
     public AnimationController AnimationController => AnimationController.Get(this);
 
+    /// <summary>
+    /// このスキマティックを構成する全ブロック（SchematicBlockData 由来）。
+    /// </summary>
+    public IReadOnlyList<SchematicBlock> Blocks
+    {
+        get
+        {
+            _blocks.RemoveAll(block => block == null);
+            return _blocks;
+        }
+    }
+
+    /// <summary>
+    /// 名前でブロックを 1 つ検索する。完全一致（大文字小文字無視）を優先し、
+    /// <paramref name="allowPartial"/> が true なら部分一致にもフォールバックする。
+    /// </summary>
+    public SchematicBlock? FindBlock(string name, bool allowPartial = true)
+    {
+        SchematicBlock? exact = null;
+        SchematicBlock? partial = null;
+
+        foreach (SchematicBlock block in Blocks)
+        {
+            if (string.Equals(block.BlockName, name, StringComparison.OrdinalIgnoreCase))
+            {
+                exact = block;
+                break;
+            }
+
+            if (allowPartial && partial == null &&
+                block.BlockName?.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                partial = block;
+            }
+        }
+
+        return exact ?? partial;
+    }
+
+    /// <summary>
+    /// 名前でブロックを列挙する。<paramref name="allowPartial"/> が true なら部分一致も含む。
+    /// </summary>
+    public IEnumerable<SchematicBlock> FindBlocks(string name, bool allowPartial = true)
+        => Blocks.Where(block =>
+            allowPartial
+                ? block.BlockName?.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0
+                : string.Equals(block.BlockName, name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// ブロック種別（Primitive / Light / Pickup / Interactable など）で列挙する。
+    /// </summary>
+    public IEnumerable<SchematicBlock> FindBlocks(BlockType blockType)
+        => Blocks.Where(block => block.BlockType == blockType);
+
+    /// <summary>
+    /// 条件式でブロックを列挙する。
+    /// </summary>
+    public IEnumerable<SchematicBlock> FindBlocks(Func<SchematicBlock, bool> predicate)
+        => Blocks.Where(predicate);
+
+    /// <summary>
+    /// 指定コンポーネントを持つブロックからコンポーネントを列挙する。
+    /// <paramref name="blockName"/> を指定するとブロック名（部分一致）でも絞り込む。
+    /// </summary>
+    public IEnumerable<T> FindBlockComponents<T>(string? blockName = null) where T : Component
+    {
+        foreach (SchematicBlock block in Blocks)
+        {
+            if (blockName != null &&
+                block.BlockName?.IndexOf(blockName, StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                continue;
+            }
+
+            if (block.TryGetComponent(out T component))
+                yield return component;
+        }
+    }
+
+    /// <summary>
+    /// ObjectPrefabSchematicInfo のキーでブロックを取得する（大文字小文字無視）。
+    /// </summary>
+    public SchematicBlock? FindBlockByKey(string key)
+        => Blocks.FirstOrDefault(block =>
+            string.Equals(block.ObjectPrefabKey, key, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// ObjectPrefabSchematicInfo のキーを持つ（= ObjectPrefab 管理対象の）ブロックを列挙する。
+    /// </summary>
+    public IEnumerable<SchematicBlock> GetPrefabManagedBlocks()
+        => Blocks.Where(block => block.HasObjectPrefabKey);
+
+    /// <summary>
+    /// スキマティック内オブジェクト ID からブロックを取得する。
+    /// </summary>
+    public SchematicBlock? GetBlockById(int objectId)
+        => Blocks.FirstOrDefault(block => block.ObjectId == objectId);
+
+    /// <summary>
+    /// スキマティック内オブジェクト ID から Transform を取得する
+    /// （ブロック以外のマーカー類も対象）。
+    /// </summary>
+    public Transform? GetTransformById(int objectId)
+        => ObjectFromId.TryGetValue(objectId, out Transform tf) ? tf : null;
+
     // Destroy 冪等化用
     private bool _isCleanedUp;
 
@@ -168,7 +273,14 @@ public class SchematicObject : MonoBehaviour
             return null;
 
         GameObject gameObject = block.Create(this, parentTransform);
-        NetworkServer.Spawn(gameObject);
+
+        // NetworkIdentity を持たない GO（確率外れ Pickup / 遅延スポーナー等）は Spawn しない
+        if (gameObject.TryGetComponent(out NetworkIdentity _))
+            NetworkServer.Spawn(gameObject);
+
+        SchematicBlock schematicBlock = gameObject.AddComponent<SchematicBlock>();
+        schematicBlock.Init(this, block);
+        _blocks.Add(schematicBlock);
 
         ObjectFromId.Add(block.ObjectId, gameObject.transform);
 
@@ -246,8 +358,7 @@ public class SchematicObject : MonoBehaviour
             teleportGo.transform.localScale = teleportData.Scale;
 
             BoxCollider boxCollider = teleportGo.AddComponent<BoxCollider>();
-            boxCollider.isTrigger = true;
-            boxCollider.size = teleportData.TriggerScale;
+            TeleportHelper.ConfigureTrigger(boxCollider, teleportData.TriggerScale);
 
             SchematicTeleportObject teleportComponent = teleportGo.AddComponent<SchematicTeleportObject>();
             teleportComponent.Id = teleportData.Id;
@@ -415,6 +526,7 @@ public class SchematicObject : MonoBehaviour
 
     internal Dictionary<int, Transform> ObjectFromId = [];
 
+    private readonly List<SchematicBlock> _blocks = [];
     private readonly List<GameObject> _attachedBlocks = [];
     private readonly List<NetworkIdentity> _networkIdentities = [];
     private readonly List<AdminToyBase> _adminToyBases = [];

@@ -18,6 +18,8 @@ public class SchematicObjectPrefabData
 
     public string PrefabType { get; set; } = string.Empty;
 
+    public string Tag { get; set; } = string.Empty;
+
     public int MaxRooms { get; set; } = 1;
 
     public bool AutoDestroyEnabled { get; set; }

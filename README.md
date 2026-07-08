@@ -14,8 +14,15 @@
 </div>
 
 # Installation
-Put your [`MapEditorReborn.dll`](https://github.com/Michal78900/ProjectMER/releases/latest) file in `LabAPI-beta/plugins` path.
-Once your plugin will load, it will create directory `LapAPI-beta/configs/ProjectMER`; This directory will contain two sub-directories **Schematics** and **Maps**
+Put your [`MapEditorReborn.dll`](https://github.com/Michal78900/ProjectMER/releases/latest) file in `LabAPI/plugins/global/`.
+
+Unzip [`Harmony-Fat.2.3.6.0.zip`](https://github.com/pardeike/Harmony/releases/download/v2.3.6.0/Harmony-Fat.2.3.6.0.zip).
+
+Within the unzipped archive, move `net48/0Harmony.dll` to `LabAPI/dependencies/global/`.
+
+Once your plugin loads, it will create a directory at `LabAPI/configs/ProjectMER`. This directory will contain two sub-directories: **Schematics** and **Maps**.
+
+**[Wiki (WIP)](https://github.com/Michal78900/ProjectMER/wiki)**
 
 **[Full MER tutorial](https://docs.google.com/document/d/10V2PnqobeBFb2xTFIHSGmM2KK9_h2wethiVQdcjyhGc/edit?usp=sharing)**
 

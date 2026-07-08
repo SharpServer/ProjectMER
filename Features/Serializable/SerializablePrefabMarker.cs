@@ -1,5 +1,7 @@
 using AdminToys;
 using LabApi.Features.Wrappers;
+using MapGeneration.Distributors;
+using Mirror;
 using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Interfaces;
 using UnityEngine;
@@ -30,21 +32,33 @@ public class SerializablePrefabMarker : SerializableObject, IIndicatorDefinition
         // Existing instance: just move it. A PrefabType change triggers a full reload (see RequiresReloading).
         if (instance != null)
         {
-            instance.transform.SetPositionAndRotation(position, rotation);
-            instance.transform.localScale = Scale;
+            ApplyTransform(instance, position, rotation);
+            ResyncNetworkObject(instance);
             return instance;
         }
 
         if (!Enum.TryParse(PrefabType, true, out ExiledPrefabType prefabType))
-            return null;
+            return CreateMarker(position, rotation);
 
         // PrefabHelper.Spawn instantiates the prefab and calls NetworkServer.Spawn itself,
         // mirroring how the other SerializableObjects own their networking.
-        GameObject? spawned = PrefabHelper.Spawn(prefabType, position, rotation);
-        if (spawned == null)
-            return null;
+        GameObject? spawned;
+        try
+        {
+            spawned = PrefabHelper.Spawn(prefabType, position, rotation);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"PrefabMarker failed to spawn prefab '{PrefabType}': {ex}");
+            return CreateMarker(position, rotation);
+        }
 
-        spawned.transform.localScale = Scale;
+        if (spawned == null)
+            return CreateMarker(position, rotation);
+
+        spawned.name = $"PrefabMarker ({prefabType})";
+        ApplyTransform(spawned, position, rotation);
+        ResyncNetworkObject(spawned);
         return spawned;
     }
 
@@ -69,4 +83,33 @@ public class SerializablePrefabMarker : SerializableObject, IIndicatorDefinition
     public override bool RequiresReloading => Index != _prevIndex || PrefabType != _prevPrefabType;
 
     private string _prevPrefabType = string.Empty;
+
+    private GameObject CreateMarker(Vector3 position, Quaternion rotation)
+    {
+        GameObject marker = new("PrefabMarker");
+        marker.transform.SetPositionAndRotation(position, rotation);
+        marker.transform.localScale = Scale;
+        return marker;
+    }
+
+    private void ApplyTransform(GameObject gameObject, Vector3 position, Quaternion rotation)
+    {
+        gameObject.transform.SetPositionAndRotation(position, rotation);
+        gameObject.transform.localScale = Scale;
+
+        if (!gameObject.TryGetComponent(out StructurePositionSync structurePositionSync))
+            return;
+
+        structurePositionSync.Network_position = position;
+        structurePositionSync.Network_rotationY = (sbyte)Mathf.RoundToInt(rotation.eulerAngles.y / 5.625f);
+    }
+
+    private static void ResyncNetworkObject(GameObject gameObject)
+    {
+        if (!gameObject.TryGetComponent<NetworkIdentity>(out _))
+            return;
+
+        NetworkServer.UnSpawn(gameObject);
+        NetworkServer.Spawn(gameObject);
+    }
 }

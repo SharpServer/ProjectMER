@@ -84,9 +84,15 @@ public class Create : ICommand
 
 		if (Enum.TryParse(objectName, true, out ToolGunObjectType parsedEnum) && Enum.IsDefined(typeof(ToolGunObjectType), parsedEnum))
 		{
-			ToolGunHandler.CreateObject(position, parsedEnum);
+			var createdObject = ToolGunHandler.CreateObjectAndGet(position, parsedEnum);
+			if (createdObject is null)
+			{
+				response = $"{objectName} could not be spawned!";
+				return false;
+			}
+
 			if (Config.AutoSelect && player is not null)
-				ToolGunHandler.SelectObject(player, MapUtils.UntitledMap.SpawnedObjects.Last());
+				ToolGunHandler.SelectObject(player, createdObject);
 
 			response = $"{objectName} has been successfully spawned!";
 			return true;
@@ -102,9 +108,15 @@ public class Create : ICommand
 			return false;
 		}
 
-		ToolGunHandler.CreateObject(position, ToolGunObjectType.Schematic, objectName);
+		var schematicObject = ToolGunHandler.CreateObjectAndGet(position, ToolGunObjectType.Schematic, objectName);
+		if (schematicObject is null)
+		{
+			response = $"{objectName} could not be spawned!";
+			return false;
+		}
+
 		if (Config.AutoSelect && player is not null)
-			ToolGunHandler.SelectObject(player, MapUtils.UntitledMap.SpawnedObjects.LastOrDefault());
+			ToolGunHandler.SelectObject(player, schematicObject);
 
 		response = $"{objectName} has been successfully spawned!";
 		return true;

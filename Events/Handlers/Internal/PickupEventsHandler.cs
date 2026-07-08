@@ -88,17 +88,19 @@ public class PickupEventsHandler : CustomEventsHandler
 		if (!CustomItemPickupUses.TryGetValue(ev.Pickup.Serial, out CustomItemPickupUseInfo useInfo))
 			return false;
 
-		if (useInfo.UsesLeft <= 1)
-		{
-			CustomItemPickupUses.Remove(ev.Pickup.Serial);
-			return true;
-		}
-
 		ev.IsAllowed = false;
 		ev.Pickup.IsInUse = false;
 
-		if (ItemSpawnpointCustomItemRegistry.TryGive(useInfo.CustomItemKey, ev.Pickup.Base, ev.Player))
-			useInfo.UsesLeft--;
+		if (!ItemSpawnpointCustomItemRegistry.TryGive(useInfo.CustomItemKey, ev.Pickup.Base, ev.Player))
+			return true;
+
+		if (--useInfo.UsesLeft > 0)
+			return true;
+
+		CustomItemPickupUses.Remove(ev.Pickup.Serial);
+		PickupUsesLeft.Remove(ev.Pickup.Serial);
+		ButtonPickups.Remove(ev.Pickup.Serial);
+		ev.Pickup.Base.DestroySelf();
 
 		return true;
 	}

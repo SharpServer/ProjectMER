@@ -19,12 +19,15 @@ public static class ToolGunHandler
 		if (!Raycast(player, out RaycastHit hit))
 			return;
 
-		CreateObject(hit.point, objectType, schematicName);
-		if (Config.AutoSelect)
-			SelectObject(player, MapUtils.UntitledMap.SpawnedObjects.LastOrDefault());
+		MapEditorObject? mapEditorObject = CreateObjectAndGet(hit.point, objectType, schematicName);
+		if (Config.AutoSelect && mapEditorObject is not null)
+			SelectObject(player, mapEditorObject);
 	}
 
-	public static void CreateObject(Vector3 position, ToolGunObjectType objectType, string schematicName = "")
+	public static void CreateObject(Vector3 position, ToolGunObjectType objectType, string schematicName = "") =>
+		CreateObjectAndGet(position, objectType, schematicName);
+
+	public static MapEditorObject? CreateObjectAndGet(Vector3 position, ToolGunObjectType objectType, string schematicName = "")
 	{
 		Room room = RoomExtensions.GetRoomAtPosition(position);
 
@@ -64,16 +67,24 @@ public static class ToolGunHandler
 				break;
 		}
 
-		if (map.TryAddElement(id, serializableObject))
+		bool added = map.TryAddElement(id, serializableObject);
+		if (added)
 			map.SpawnObject(id, serializableObject);
 
+		MapEditorObject? createdObject = null;
 		foreach (MapEditorObject mapEditorObject in map.SpawnedObjects)
 		{
 			if (mapEditorObject.Id != id)
 				continue;
 
 			IndicatorObject.TrySpawnOrUpdateIndicator(mapEditorObject);
+			createdObject ??= mapEditorObject;
 		}
+
+		if (added && createdObject is null)
+			map.TryRemoveElement(id);
+
+		return createdObject;
 	}
 
 	public static void DeleteObject(MapEditorObject mapEditorObject)

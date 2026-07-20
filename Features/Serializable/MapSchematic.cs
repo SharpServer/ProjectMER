@@ -95,8 +95,17 @@ public class MapSchematic
 
 		foreach (Action spawnAction in EnumeratePreSchematicSpawnActions())
 			RunSpawnAction(spawnAction);
-		foreach (KeyValuePair<string, SerializableSchematic> kVP in OrderSchematicsByPriority(prioritySchematicNames))
+
+		(List<KeyValuePair<string, SerializableSchematic>> prioritySchematics, List<KeyValuePair<string, SerializableSchematic>> remainingSchematics)
+			= SplitSchematicsByPriority(prioritySchematicNames);
+
+		foreach (KeyValuePair<string, SerializableSchematic> kVP in prioritySchematics)
 			RunSpawnAction(() => SpawnObject(kVP.Key, kVP.Value));
+		foreach (KeyValuePair<string, SerializableCustomTriggerPoint> kVP in CustomTriggerPoints)
+			RunSpawnAction(() => SpawnObject(kVP.Key, kVP.Value));
+		foreach (KeyValuePair<string, SerializableSchematic> kVP in remainingSchematics)
+			RunSpawnAction(() => SpawnObject(kVP.Key, kVP.Value));
+
 		foreach (Action spawnAction in EnumeratePostSchematicSpawnActions())
 			RunSpawnAction(spawnAction);
 		foreach (Action spawnAction in EnumerateFinalSpawnActions())
@@ -129,7 +138,34 @@ public class MapSchematic
 			}
 		}
 
-		foreach (KeyValuePair<string, SerializableSchematic> kVP in OrderSchematicsByPriority(prioritySchematicNames))
+		(List<KeyValuePair<string, SerializableSchematic>> prioritySchematics, List<KeyValuePair<string, SerializableSchematic>> remainingSchematics)
+			= SplitSchematicsByPriority(prioritySchematicNames);
+
+		foreach (KeyValuePair<string, SerializableSchematic> kVP in prioritySchematics)
+		{
+			IEnumerator<float> spawn = SpawnSchematicStaggered(kVP.Key, kVP.Value, frameBudgetMs);
+			while (spawn.MoveNext())
+				yield return spawn.Current;
+
+			if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
+			{
+				yield return Timing.WaitForOneFrame;
+				stopwatch.Restart();
+			}
+		}
+
+		foreach (KeyValuePair<string, SerializableCustomTriggerPoint> kVP in CustomTriggerPoints)
+		{
+			RunSpawnAction(() => SpawnObject(kVP.Key, kVP.Value));
+
+			if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
+			{
+				yield return Timing.WaitForOneFrame;
+				stopwatch.Restart();
+			}
+		}
+
+		foreach (KeyValuePair<string, SerializableSchematic> kVP in remainingSchematics)
 		{
 			IEnumerator<float> spawn = SpawnSchematicStaggered(kVP.Key, kVP.Value, frameBudgetMs);
 			while (spawn.MoveNext())
@@ -229,20 +265,20 @@ public class MapSchematic
 	}
 
 	/// <summary>
-	/// <paramref name="priorityNames"/> に含まれる SchematicName（先勝ち、リスト順）を先に、
-	/// 残りを元の登録順で返す。
+	/// <paramref name="priorityNames"/> に含まれる SchematicName（先勝ち、リスト順）を Priority 側へ、
+	/// 残りを元の登録順のまま Remaining 側へ振り分ける。
+	/// CustomTriggerPoints は Priority の Schematics 直後・Remaining の Schematics より前に
+	/// スポーンするため、呼び出し側で両者を分けて処理できるようにしている。
 	/// </summary>
-	private IEnumerable<KeyValuePair<string, SerializableSchematic>> OrderSchematicsByPriority(
+	private (List<KeyValuePair<string, SerializableSchematic>> Priority, List<KeyValuePair<string, SerializableSchematic>> Remaining) SplitSchematicsByPriority(
 		IReadOnlyList<string>? priorityNames)
 	{
-		if (priorityNames == null || priorityNames.Count == 0)
-		{
-			foreach (KeyValuePair<string, SerializableSchematic> kVP in Schematics)
-				yield return kVP;
-			yield break;
-		}
+		List<KeyValuePair<string, SerializableSchematic>> remaining = new(Schematics);
 
-		var remaining = new List<KeyValuePair<string, SerializableSchematic>>(Schematics);
+		if (priorityNames == null || priorityNames.Count == 0)
+			return ([], remaining);
+
+		List<KeyValuePair<string, SerializableSchematic>> priority = [];
 
 		foreach (string priorityName in priorityNames)
 		{
@@ -251,14 +287,13 @@ public class MapSchematic
 				if (!string.Equals(remaining[i].Value.SchematicName, priorityName, StringComparison.OrdinalIgnoreCase))
 					continue;
 
-				yield return remaining[i];
+				priority.Add(remaining[i]);
 				remaining.RemoveAt(i);
 				i--;
 			}
 		}
 
-		foreach (KeyValuePair<string, SerializableSchematic> kVP in remaining)
-			yield return kVP;
+		return (priority, remaining);
 	}
 
 	private IEnumerable<Action> EnumeratePreSchematicSpawnActions()
@@ -313,12 +348,11 @@ public class MapSchematic
 	/// ItemSpawnpoint（Pickup 生成、CustomItem 解決を伴う）と各種 Marker 類
 	/// （ObjectPrefabMarkers 等、Slafight 側ブリッジで追加のスキマティック生成を誘発しうる）は、
 	/// 部屋・スキマティックなど見た目の骨格が整ってから最後に処理する。
+	/// CustomTriggerPoints は優先 Schematics の直後（本メソッドより前）でスポーン済みのため対象外。
 	/// </summary>
 	private IEnumerable<Action> EnumerateFinalSpawnActions()
 	{
 		foreach (KeyValuePair<string, SerializableItemSpawnpoint> kVP in ItemSpawnpoints)
-			yield return () => SpawnObject(kVP.Key, kVP.Value);
-		foreach (KeyValuePair<string, SerializableCustomTriggerPoint> kVP in CustomTriggerPoints)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
 		foreach (KeyValuePair<string, SerializableObjectPrefabMarker> kVP in ObjectPrefabMarkers)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);

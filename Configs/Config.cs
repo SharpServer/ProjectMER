@@ -31,6 +31,15 @@ public class Config
 	[Description("Extra distance required before an already visible object is hidden. Prevents repeated loading at distance boundaries.")]
 	public float CullingHysteresis { get; set; } = 10f;
 
+	[Description("Seconds a LOD downgrade (including a full cull) must be continuously requested before it is applied. Upgrades toward higher detail always apply immediately. Prevents a player lingering near a boundary from repeatedly triggering the expensive full re-parse/re-mesh that a fresh show/LOD switch causes.")]
+	public float CullingDowngradeDelay { get; set; } = 1.5f;
+
+	[Description("If enabled, a multi-LOD cullable group (e.g. a TextToy image with LODs) never fully despawns while within CullingHardCullDistance - it downgrades to its lowest-detail LOD instead of hiding completely. This avoids the full re-parse/re-mesh cost of a fresh show when a player hovers around the culling boundary. Groups with only one LOD tier are unaffected (they still fully cull at CullingDistance+CullingHysteresis).")]
+	public bool CullingPersistLowestLod { get; set; } = true;
+
+	[Description("Distance (in meters) beyond which a persisted lowest-LOD object is fully culled even with CullingPersistLowestLod enabled.")]
+	public float CullingHardCullDistance { get; set; } = 150f;
+
 	[Description(
 	"\n" +
 	"# ------------------------------Actions on event------------------------------\n" +

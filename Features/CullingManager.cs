@@ -27,9 +27,14 @@ public static class CullingManager
         public float MediumDetailDistance;
         public float CullingDistance;
         public float Hysteresis;
+        public bool PersistLowestLod;
+        public float HardCullDistance;
         public readonly Dictionary<int, List<CullEntry>> Lods = [];
 
         public Vector3 AnchorPosition => Anchor == null ? Vector3.zero : Anchor.position;
+
+        // 最も detail の低い（数値が大きい）Lod キー。GetLod(-1) と衝突しないよう Lods が空なら -1。
+        public int LowestLod => Lods.Count == 0 ? -1 : Lods.Keys.Max();
 
         public IReadOnlyList<CullEntry> GetLod(int lod)
         {
@@ -44,7 +49,20 @@ public static class CullingManager
         {
             float limit = CullingDistance + (currentLod >= 0 ? Hysteresis : 0f);
             if (squaredDistance > limit * limit)
+            {
+                // 完全非表示にする代わりに最低詳細 Lod を維持する。TextToy 画像の再表示は
+                // 全文字列の再パース + 再メッシュ生成を伴い重いため、境界付近を往復する
+                // プレイヤーに対してその再発生を避ける。複数 Lod を持つグループにのみ適用する
+                // （単一 Lod のグループでは「最低詳細」が「フル詳細」と同じになってしまうため）。
+                if (PersistLowestLod && Lods.Count > 1)
+                {
+                    float hardLimit = Mathf.Max(HardCullDistance, limit);
+                    if (squaredDistance <= hardLimit * hardLimit)
+                        return LowestLod;
+                }
+
                 return -1;
+            }
 
             int requested;
             if (currentLod == 0 && squaredDistance <= (HighDetailDistance + Hysteresis) * (HighDetailDistance + Hysteresis))
@@ -78,6 +96,11 @@ public static class CullingManager
         public IReadOnlyList<CullEntry> Hiding = Array.Empty<CullEntry>();
         public bool IsTransitioning;
         public float LastSquaredDistance = float.PositiveInfinity;
+
+        // ダウングレード（詳細度を下げる、または完全カリング）の保留状態。
+        // NoPendingDowngrade のときは保留なし。
+        public int PendingDowngradeLod = NoPendingDowngrade;
+        public float PendingDowngradeSince;
     }
 
     private static readonly Dictionary<string, CullGroup> Groups = [];
@@ -93,6 +116,12 @@ public static class CullingManager
     private static float UpdateInterval => Math.Max(0.05f, ProjectMER.Singleton.Config!.CullingUpdateInterval);
     private static float SendInterval => Math.Max(0.02f, ProjectMER.Singleton.Config!.CullingSendInterval);
     private static int ObjectsPerUpdate => Math.Max(1, ProjectMER.Singleton.Config!.CullingObjectsPerUpdate);
+    private static float DowngradeDelay => Math.Max(0f, ProjectMER.Singleton.Config!.CullingDowngradeDelay);
+    private static bool PersistLowestLod => ProjectMER.Singleton.Config!.CullingPersistLowestLod;
+    private static float DefaultHardCullDistance => Math.Max(DefaultDistance, ProjectMER.Singleton.Config!.CullingHardCullDistance);
+
+    // ViewState.PendingDowngradeLod の「保留なし」を表す番兵値。
+    private const int NoPendingDowngrade = int.MinValue;
 
     public static void PrepareStandalone(NetworkIdentity identity)
     {
@@ -108,6 +137,8 @@ public static class CullingManager
             MediumDetailDistance = DefaultDistance,
             CullingDistance = DefaultDistance,
             Hysteresis = DefaultHysteresis,
+            PersistLowestLod = PersistLowestLod,
+            HardCullDistance = DefaultHardCullDistance,
         };
         RegisterGroup(group);
         AddIdentity(group, identity, 0, 0);
@@ -137,6 +168,8 @@ public static class CullingManager
                 MediumDetailDistance = GetFloat(properties, "ImageMediumDetailDistance", DefaultDistance),
                 CullingDistance = GetFloat(properties, "ImageCullingDistance", DefaultDistance),
                 Hysteresis = GetFloat(properties, "ImageCullingHysteresis", DefaultHysteresis),
+                PersistLowestLod = PersistLowestLod,
+                HardCullDistance = DefaultHardCullDistance,
             };
             RegisterGroup(group);
         }
@@ -265,6 +298,7 @@ public static class CullingManager
 
         if (scan)
         {
+            float now = Time.realtimeSinceStartup;
             foreach (CullGroup group in Groups.Values.ToArray())
             {
                 if (group.Anchor == null)
@@ -276,6 +310,10 @@ public static class CullingManager
                 state.LastSquaredDistance = squaredDistance;
                 int current = state.IsTransitioning ? state.TargetLod : state.CurrentLod;
                 int requested = group.SelectLod(squaredDistance, current);
+
+                if (!ShouldApplyRequest(state, current, requested, now))
+                    continue;
+
                 if (!state.IsTransitioning && requested != state.CurrentLod)
                     BeginTransition(group, state, requested);
                 else if (state.IsTransitioning && requested != state.TargetLod)
@@ -292,6 +330,49 @@ public static class CullingManager
                 break;
             budget -= ProcessTransition(pair.Key, pair.Value, connection, budget);
         }
+    }
+
+    // 詳細度を上げる要求（アップグレード、および非表示状態からの初回表示）は即座に適用する。
+    // 詳細度を下げる要求（ダウングレード、完全カリングを含む）は DowngradeDelay 秒
+    // 継続して要求され続けた場合のみ適用する。境界付近を往復するプレイヤーが
+    // 毎スキャンで高コストな再表示/再パースを引き起こすのを防ぐ。
+    private static bool ShouldApplyRequest(ViewState state, int current, int requested, float now)
+    {
+        if (!IsWorse(requested, current))
+        {
+            state.PendingDowngradeLod = NoPendingDowngrade;
+            return true;
+        }
+
+        float delay = DowngradeDelay;
+        if (delay <= 0f)
+            return true;
+
+        if (state.PendingDowngradeLod != requested)
+        {
+            state.PendingDowngradeLod = requested;
+            state.PendingDowngradeSince = now;
+            return false;
+        }
+
+        if (now - state.PendingDowngradeSince < delay)
+            return false;
+
+        state.PendingDowngradeLod = NoPendingDowngrade;
+        return true;
+    }
+
+    // -1（完全カリング）はどの表示状態よりも「悪い」。Lod 番号は大きいほど詳細度が低い。
+    // current が非表示（-1）の場合は「初回表示」であり、ダウングレードとは扱わない。
+    private static bool IsWorse(int requested, int current)
+    {
+        if (requested == current)
+            return false;
+        if (current < 0)
+            return false;
+        if (requested < 0)
+            return true;
+        return requested > current;
     }
 
     private static void BeginTransition(CullGroup group, ViewState state, int targetLod)

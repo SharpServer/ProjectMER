@@ -58,6 +58,8 @@ public class MapSchematic
 
 	public Dictionary<string, SerializablePrefabMarker> PrefabMarkers { get; set; } = [];
 
+	public Dictionary<string, SerializableEventInvokeMarker> EventInvokeMarkers { get; set; } = [];
+
 	public List<MapEditorObject> SpawnedObjects = [];
 
 	public MapSchematic Merge(MapSchematic other)
@@ -80,6 +82,7 @@ public class MapSchematic
 		CustomTriggerPoints.AddRange(other.CustomTriggerPoints);
 		ObjectPrefabMarkers.AddRange(other.ObjectPrefabMarkers);
 		PrefabMarkers.AddRange(other.PrefabMarkers);
+		EventInvokeMarkers.AddRange(other.EventInvokeMarkers);
 
 		return this;
 	}
@@ -123,6 +126,7 @@ public class MapSchematic
 		CustomTriggerPoints.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
 		ObjectPrefabMarkers.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
 		PrefabMarkers.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
+		EventInvokeMarkers.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
 	}
 
 	public void SpawnObject<T>(string id, T serializableObject) where T : SerializableObject
@@ -214,6 +218,8 @@ public class MapSchematic
 
 		if (PrefabMarkers.TryAdd(id, serializableObject))
 			return true;
+		if (EventInvokeMarkers.TryAdd(id, serializableObject))
+			return true;
 
 		IsDirty = dirtyPrevValue;
 		return false;
@@ -276,6 +282,8 @@ public class MapSchematic
 			return true;
 
 		if (PrefabMarkers.Remove(id))
+			return true;
+		if (EventInvokeMarkers.Remove(id))
 			return true;
 
 		IsDirty = dirtyPrevValue;

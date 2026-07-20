@@ -19,7 +19,8 @@ public static class MapUtils
 		if (mapName == UntitledMapName)
 			throw new InvalidOperationException("This map name is reserved for internal use!");
 
-		if (LoadedMaps.TryGetValue(mapName, out MapSchematic map)) // Map is already loaded
+		bool isLoaded = LoadedMaps.TryGetValue(mapName, out MapSchematic map);
+		if (isLoaded) // Map is already loaded
 		{
 			map.Merge(UntitledMap);
 		}
@@ -36,8 +37,18 @@ public static class MapUtils
 		File.WriteAllText(path, YamlParser.Serializer.Serialize(map));
 		map.IsDirty = false;
 
-		UnloadMap(UntitledMapName);
-		LoadMap(mapName);
+		MapSchematic untitledMap = UntitledMap;
+		foreach (MapEditorObject mapEditorObject in untitledMap.SpawnedObjects)
+		{
+			mapEditorObject.MoveToMap(mapName);
+			map.SpawnedObjects.Add(mapEditorObject);
+		}
+
+		untitledMap.SpawnedObjects.Clear();
+		LoadedMaps.Remove(UntitledMapName);
+
+		if (!isLoaded)
+			LoadedMaps.Add(mapName, map);
 	}
 
 	public static void LoadMap(string mapName)

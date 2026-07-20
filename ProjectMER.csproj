@@ -36,4 +36,16 @@
     <PackageReference Include="Lib.Harmony" Version="2.3.6" />
   </ItemGroup>
 
+  <Target Name="CopyReleaseToLabApiAndReferences" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <PropertyGroup>
+      <SLReferencesDir>$(SL_References)</SLReferencesDir>
+      <LabApiPluginsDir>$(APPDATA)\SCP Secret Laboratory\LabAPI\plugins\7777</LabApiPluginsDir>
+    </PropertyGroup>
+    <Error Condition="'$(SLReferencesDir)' == ''" Text="The SL_References environment variable is not set." />
+    <Error Condition="'$(APPDATA)' == ''" Text="The APPDATA environment variable is not set." />
+    <MakeDir Directories="$(SLReferencesDir);$(LabApiPluginsDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(SLReferencesDir)" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(LabApiPluginsDir)" SkipUnchangedFiles="false" />
+  </Target>
+
 </Project>

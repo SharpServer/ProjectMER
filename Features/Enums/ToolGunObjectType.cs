@@ -20,4 +20,5 @@ public enum ToolGunObjectType
 	CustomTriggerPoint = 15,
 	ObjectPrefabMarker = 16,
 	PrefabMarker = 17,
+	EventInvokeMarker = 18,
 }

@@ -31,8 +31,9 @@ public class SerializableText : SerializableObject, IIndicatorDefinition
 
 		if (instance == null)
 		{
+			if (Text?.Length >= 2048)
+				CullingManager.PrepareStandalone(text.netIdentity);
 			NetworkServer.Spawn(text.gameObject);
-			CullingManager.RegisterCullable(text.netIdentity);
 		}
 
 		return text.gameObject;

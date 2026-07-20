@@ -1,10 +1,10 @@
-using Exiled.API.Enums;
 using LabApi.Features.Wrappers;
 using MapGeneration;
 using NorthwoodLib.Pools;
 using ProjectMER.Features.Serializable;
 using UnityEngine;
 using ExiledRoom = Exiled.API.Features.Room;
+using RoomType = Exiled.API.Enums.RoomType;
 
 namespace ProjectMER.Features.Extensions;
 
@@ -48,7 +48,8 @@ public static class RoomExtensions
 	}
 
 	/// <summary>
-	/// Determines the <see cref="RoomType"/> of a room using EXILED's room type resolution.
+	/// Determines the <see cref="RoomType"/> of a room by delegating to EXILED's room wrapper,
+	/// so identification stays in sync with EXILED instead of a local name-to-type mapping.
 	/// </summary>
 	public static RoomType FindRoomType(this Room room)
 	{
@@ -58,7 +59,8 @@ public static class RoomExtensions
 		if (room.Name == RoomName.Outside)
 			return RoomType.Surface;
 
-		return ExiledRoom.Get(room.Base)?.Type ?? RoomType.Unknown;
+		ExiledRoom? exiledRoom = ExiledRoom.Get(room.Base);
+		return exiledRoom == null ? RoomType.Unknown : exiledRoom.Type;
 	}
 
 	public static string FindRoomTypeName(this Room room) => room.FindRoomType().ToString();
@@ -68,8 +70,8 @@ public static class RoomExtensions
 		if (roomId == null || roomId.Trim().Length == 0)
 			return true;
 
-		return roomId.Equals(nameof(RoomType.Unknown), StringComparison.OrdinalIgnoreCase) ||
-		       roomId.Equals(nameof(RoomType.Surface), StringComparison.OrdinalIgnoreCase) ||
-		       roomId.Equals("Outside", StringComparison.OrdinalIgnoreCase);
+		return roomId.Equals("Unknown", StringComparison.OrdinalIgnoreCase)
+			|| roomId.Equals("Surface", StringComparison.OrdinalIgnoreCase)
+			|| roomId.Equals("Outside", StringComparison.OrdinalIgnoreCase);
 	}
 }

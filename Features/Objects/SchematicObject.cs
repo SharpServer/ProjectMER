@@ -243,8 +243,9 @@ public class SchematicObject : MonoBehaviour
 
         AddRigidbodies();
         AddTeleports();
-        AddTriggerPoints();
-        AddObjectPrefabs();
+		AddTriggerPoints();
+		AddEventInvokeMarkers();
+		AddObjectPrefabs();
         AddDoors();
         AddAnimators();
 
@@ -275,8 +276,13 @@ public class SchematicObject : MonoBehaviour
         GameObject gameObject = block.Create(this, parentTransform);
 
         // NetworkIdentity を持たない GO（確率外れ Pickup / 遅延スポーナー等）は Spawn しない
-        if (gameObject.TryGetComponent(out NetworkIdentity _))
-            NetworkServer.Spawn(gameObject);
+		if (gameObject.TryGetComponent(out NetworkIdentity identity))
+		{
+			if (block.BlockType == BlockType.Text)
+				CullingManager.PrepareSchematicText(this, block, identity);
+
+			NetworkServer.Spawn(gameObject);
+		}
 
         SchematicBlock schematicBlock = gameObject.AddComponent<SchematicBlock>();
         schematicBlock.Init(this, block);
@@ -456,7 +462,7 @@ public class SchematicObject : MonoBehaviour
         }
     }
 
-    private bool AddRigidbodies()
+	private bool AddRigidbodies()
     {
         bool hasRigidbodies = false;
         string rigidbodyPath = Path.Combine(DirectoryPath, $"{Name}-Rigidbodies.json");
@@ -480,11 +486,35 @@ public class SchematicObject : MonoBehaviour
             hasRigidbodies = true;
         }
 
-        return hasRigidbodies;
-    }
+		return hasRigidbodies;
+	}
 
-    // 外部から呼ばれる Destroy。冪等。
-    public void Destroy()
+	private void AddEventInvokeMarkers()
+	{
+		string markerPath = Path.Combine(DirectoryPath, $"{Name}-EventInvokeMarkers.json");
+		if (!File.Exists(markerPath))
+			return;
+
+		List<SchematicEventInvokeMarkerData> markers = JsonSerializer.Deserialize<List<SchematicEventInvokeMarkerData>>(File.ReadAllText(markerPath));
+		foreach (SchematicEventInvokeMarkerData markerData in markers)
+		{
+			GameObject markerGo = new GameObject(markerData.Name);
+			Transform parentTransform = ObjectFromId.TryGetValue(markerData.ParentId, out Transform parentTf) ? parentTf : transform;
+			markerGo.transform.SetParent(parentTransform);
+			markerGo.transform.SetLocalPositionAndRotation(markerData.Position, Quaternion.Euler(markerData.Rotation));
+			markerGo.transform.localScale = markerData.Scale;
+
+			EventInvokeMarkerObject marker = markerGo.AddComponent<EventInvokeMarkerObject>();
+			marker.Id = markerData.Id;
+			marker.Tag = markerData.Tag;
+			marker.Distance = Mathf.Max(0.01f, markerData.Distance);
+			marker.Schematic = this;
+			ObjectFromId[markerData.ObjectId] = markerGo.transform;
+		}
+	}
+
+	// 外部から呼ばれる Destroy。冪等。
+	public void Destroy()
     {
         DestroyInternal();
     }
@@ -494,7 +524,8 @@ public class SchematicObject : MonoBehaviour
         if (_isCleanedUp)
             return;
 
-        _isCleanedUp = true;
+		_isCleanedUp = true;
+		CullingManager.UnregisterSchematic(this);
 
         // AnimationController の辞書から削除
         AnimationController.Dictionary.Remove(this);

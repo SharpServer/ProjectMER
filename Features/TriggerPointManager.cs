@@ -256,4 +256,3 @@ public sealed class TriggerPointInfo
         SchematicTriggerPointObject schematicObject) =>
         new(id, tag, position, rotation, null, schematicObject);
 }
-

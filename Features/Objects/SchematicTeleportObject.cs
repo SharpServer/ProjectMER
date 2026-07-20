@@ -10,6 +10,8 @@ namespace ProjectMER.Features.Objects;
 /// </summary>
 public class SchematicTeleportObject : MonoBehaviour, ITeleporter
 {
+    private static readonly HashSet<SchematicTeleportObject> Instances = [];
+
     public string Id;
 
     public List<string> Targets = [];
@@ -30,6 +32,16 @@ public class SchematicTeleportObject : MonoBehaviour, ITeleporter
         TryGetComponent(out _trigger);
     }
 
+    private void OnEnable()
+    {
+        Instances.Add(this);
+    }
+
+    private void OnDisable()
+    {
+        Instances.Remove(this);
+    }
+
     private void FixedUpdate()
     {
         TeleportHelper.Tick(this);
@@ -40,14 +52,13 @@ public class SchematicTeleportObject : MonoBehaviour, ITeleporter
         if (Targets is not { Count: > 0 } targets)
             return null;
 
-        SchematicTeleportObject[] teleportObjects = FindObjectsByType<SchematicTeleportObject>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
         int startIndex = UnityEngine.Random.Range(0, targets.Count);
 
         for (int i = 0; i < targets.Count; i++)
         {
             string targetId = targets[(startIndex + i) % targets.Count];
 
-            foreach (SchematicTeleportObject teleportObject in teleportObjects)
+            foreach (SchematicTeleportObject teleportObject in Instances)
             {
                 if (teleportObject == this || teleportObject.Id != targetId)
                     continue;
@@ -61,6 +72,7 @@ public class SchematicTeleportObject : MonoBehaviour, ITeleporter
 
     private void OnDestroy()
     {
+        Instances.Remove(this);
         TeleportHelper.ClearArrivalReservation(transform);
     }
 }

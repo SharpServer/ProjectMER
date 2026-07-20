@@ -11,6 +11,7 @@ using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Objects;
 using ProjectMER.Features.Serializable;
 using ProjectMER.Features.ToolGun;
+using UnityEngine;
 using Utils.NonAllocLINQ;
 
 namespace ProjectMER.Commands.Modifying;
@@ -87,6 +88,9 @@ public class Modify : ICommand
 			response = $"There isn't any object property that contains \"{arguments.At(0)}\" in it's name!";
 			return false;
 		}
+
+		if (foundProperty.Name == nameof(SerializableObject.Room))
+			return HandleRoom(out response);
 
 		bool result;
 		if (typeof(IDictionary).IsAssignableFrom(foundProperty.PropertyType))
@@ -167,6 +171,68 @@ public class Modify : ICommand
 			mapEditorObject.Map.TryRemoveElement(mapEditorObject.Id);
 			mapEditorObject.Map.Reload();
 			response = "You've successfully modified the object's ID!";
+			return true;
+		}
+
+		bool HandleRoom(out string response)
+		{
+			if (arguments.Count < 2)
+			{
+				response = "You need to provide a room value!";
+				return false;
+			}
+
+			Vector3 worldPosition = mapEditorObject.transform.position;
+			Quaternion worldRotation = mapEditorObject.transform.rotation;
+			string previousRoom = mapEditorObject.Base.Room;
+			string newRoom = string.Join(" ", arguments.Skip(1));
+
+			mapEditorObject.Base.Room = newRoom;
+			List<Room> rooms = mapEditorObject.Base.GetRooms();
+			if (rooms.Count == 0)
+			{
+				mapEditorObject.Base.Room = previousRoom;
+				ListPool<Room>.Shared.Return(rooms);
+				response = $"There are no rooms matching \"{newRoom}\" in the current map!";
+				return false;
+			}
+
+			Room? indexedRoom = rooms
+				.Where(room => mapEditorObject.Base.Index < 0 || room.GetRoomIndex() == mapEditorObject.Base.Index)
+				.OrderBy(room => (room.Transform.position - worldPosition).sqrMagnitude)
+				.FirstOrDefault();
+			Room targetRoom = indexedRoom ?? rooms.OrderBy(room => (room.Transform.position - worldPosition).sqrMagnitude).First();
+			if (mapEditorObject.Base.Index >= 0 && indexedRoom is null)
+				mapEditorObject.Base.Index = targetRoom.GetRoomIndex();
+
+			if (targetRoom.Name == MapGeneration.RoomName.Outside)
+			{
+				mapEditorObject.Base.Position = worldPosition;
+				mapEditorObject.Base.Rotation = worldRotation.eulerAngles;
+			}
+			else
+			{
+				mapEditorObject.Base.Position = targetRoom.Transform.InverseTransformPoint(worldPosition);
+				mapEditorObject.Base.Rotation = (Quaternion.Inverse(targetRoom.Transform.rotation) * worldRotation).eulerAngles;
+			}
+
+			ListPool<Room>.Shared.Return(rooms);
+
+			MapSchematic map = mapEditorObject.Map;
+			string id = mapEditorObject.Id;
+			SerializableObject serializableObject = mapEditorObject.Base;
+			map.IsDirty = true;
+			map.DestroyObject(id);
+			map.SpawnObject(id, serializableObject);
+
+			MapEditorObject? replacement = map.SpawnedObjects
+				.Where(obj => obj.Id == id)
+				.OrderBy(obj => (obj.transform.position - worldPosition).sqrMagnitude)
+				.FirstOrDefault();
+			if (replacement is not null)
+				ToolGunHandler.SelectObject(player, replacement);
+
+			response = "You've successfully modified the object's room and converted its position and rotation!";
 			return true;
 		}
 

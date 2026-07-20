@@ -1,182 +1,359 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using LabApi.Features.Wrappers;
 using MEC;
 using Mirror;
-using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Objects;
+using ProjectMER.Features.Serializable.Schematics;
 using UnityEngine;
 
 namespace ProjectMER.Features;
 
-/// <summary>
-/// Manages distance-based culling for heavy MapEditorObjects (TextToys, Primitives, etc.).
-/// Prevents sending spawn data to players who are too far away, and dynamically shows/hides
-/// objects as players move.
-/// </summary>
 public static class CullingManager
 {
-	/// <summary>
-	/// When true, the <see cref="Patches.CullingSendSpawnMessagePatch"/> will not intercept spawn messages.
-	/// Used internally when intentionally sending spawn messages to specific players.
-	/// </summary>
-	public static bool BypassCulling;
+    private sealed class CullEntry
+    {
+        public NetworkIdentity Identity = null!;
+        public int Order;
+    }
 
-	/// <summary>
-	/// All NetworkIdentities registered for distance-based culling.
-	/// </summary>
-	private static readonly HashSet<NetworkIdentity> CullableIdentities = [];
+    private sealed class CullGroup
+    {
+        public string Key = string.Empty;
+        public Transform Anchor = null!;
+        public SchematicObject? Owner;
+        public float HighDetailDistance;
+        public float MediumDetailDistance;
+        public float CullingDistance;
+        public float Hysteresis;
+        public readonly Dictionary<int, List<CullEntry>> Lods = [];
 
-	/// <summary>
-	/// Tracks which NetworkIdentities are currently hidden from which connections.
-	/// If a connection is in the set for a given identity, the object has NOT been spawned for that player.
-	/// </summary>
-	private static readonly Dictionary<NetworkIdentity, HashSet<NetworkConnection>> HiddenFrom = [];
+        public Vector3 AnchorPosition => Anchor == null ? Vector3.zero : Anchor.position;
 
-	private static CoroutineHandle _cullingCoroutine;
+        public IReadOnlyList<CullEntry> GetLod(int lod)
+        {
+            if (lod < 0 || !Lods.TryGetValue(lod, out List<CullEntry>? entries))
+                return Array.Empty<CullEntry>();
+            entries.RemoveAll(entry => entry.Identity == null);
+            entries.Sort((left, right) => left.Order.CompareTo(right.Order));
+            return entries;
+        }
 
-	private static float CullingDistance => ProjectMER.Singleton.Config!.CullingDistance;
-	private static float CullingUpdateInterval => ProjectMER.Singleton.Config!.CullingUpdateInterval;
-	private static bool IsEnabled => ProjectMER.Singleton.Config!.EnableCulling;
+        public int SelectLod(float squaredDistance, int currentLod)
+        {
+            float limit = CullingDistance + (currentLod >= 0 ? Hysteresis : 0f);
+            if (squaredDistance > limit * limit)
+                return -1;
 
-	/// <summary>
-	/// Registers a <see cref="NetworkIdentity"/> for distance-based culling.
-	/// Objects registered here will only be sent to players within <see cref="CullingDistance"/>.
-	/// </summary>
-	public static void RegisterCullable(NetworkIdentity identity)
-	{
-		if (!IsEnabled)
-			return;
+            int requested;
+            if (currentLod == 0 && squaredDistance <= (HighDetailDistance + Hysteresis) * (HighDetailDistance + Hysteresis))
+                requested = 0;
+            else if (currentLod == 1 && squaredDistance <= (MediumDetailDistance + Hysteresis) * (MediumDetailDistance + Hysteresis))
+                requested = squaredDistance <= HighDetailDistance * HighDetailDistance ? 0 : 1;
+            else if (currentLod == 2)
+                requested = squaredDistance <= HighDetailDistance * HighDetailDistance
+                    ? 0
+                    : squaredDistance <= MediumDetailDistance * MediumDetailDistance ? 1 : 2;
+            else
+                requested = squaredDistance <= HighDetailDistance * HighDetailDistance
+                    ? 0
+                    : squaredDistance <= MediumDetailDistance * MediumDetailDistance ? 1 : 2;
+            if (Lods.ContainsKey(requested))
+                return requested;
+            if (Lods.ContainsKey(0))
+                return 0;
+            return Lods.Count == 0 ? -1 : Lods.Keys.OrderBy(key => Math.Abs(key - requested)).First();
+        }
+    }
 
-		CullableIdentities.Add(identity);
-	}
+    private sealed class ViewState
+    {
+        public int CurrentLod = -1;
+        public int TargetLod = -1;
+        public int RequestedLod = -1;
+        public int ShowIndex;
+        public int HideIndex;
+        public IReadOnlyList<CullEntry> Showing = Array.Empty<CullEntry>();
+        public IReadOnlyList<CullEntry> Hiding = Array.Empty<CullEntry>();
+        public bool IsTransitioning;
+        public float LastSquaredDistance = float.PositiveInfinity;
+    }
 
-	/// <summary>
-	/// Unregisters a <see cref="NetworkIdentity"/> from culling.
-	/// </summary>
-	public static void UnregisterCullable(NetworkIdentity identity)
-	{
-		CullableIdentities.Remove(identity);
-		HiddenFrom.Remove(identity);
-	}
+    private static readonly Dictionary<string, CullGroup> Groups = [];
+    private static readonly Dictionary<NetworkIdentity, CullGroup> IdentityGroups = [];
+    private static readonly Dictionary<NetworkConnectionToClient, Dictionary<CullGroup, ViewState>> PlayerStates = [];
+    private static CoroutineHandle _cullingCoroutine;
+    private static float _nextErrorLogTime;
 
-	/// <summary>
-	/// Returns true if the given <see cref="NetworkIdentity"/> is registered for culling.
-	/// </summary>
-	public static bool IsCullable(NetworkIdentity identity) => CullableIdentities.Contains(identity);
+    private static bool IsEnabled => ProjectMER.Singleton?.Config?.EnableCulling == true &&
+        ProjectMER.Singleton.Config.EnableTextToyOptimization;
+    private static float DefaultDistance => Math.Max(0.1f, ProjectMER.Singleton.Config!.CullingDistance);
+    private static float DefaultHysteresis => Math.Max(0f, ProjectMER.Singleton.Config!.CullingHysteresis);
+    private static float UpdateInterval => Math.Max(0.05f, ProjectMER.Singleton.Config!.CullingUpdateInterval);
+    private static float SendInterval => Math.Max(0.02f, ProjectMER.Singleton.Config!.CullingSendInterval);
+    private static int ObjectsPerUpdate => Math.Max(1, ProjectMER.Singleton.Config!.CullingObjectsPerUpdate);
 
-	/// <summary>
-	/// Records that a spawn message was blocked for the given connection.
-	/// Called by the Harmony patch when a cullable object is too far from the player.
-	/// </summary>
-	public static void MarkAsHidden(NetworkIdentity identity, NetworkConnection conn)
-	{
-		if (!HiddenFrom.TryGetValue(identity, out HashSet<NetworkConnection> set))
-		{
-			set = [];
-			HiddenFrom[identity] = set;
-		}
+    public static void PrepareStandalone(NetworkIdentity identity)
+    {
+        if (!IsEnabled || identity == null)
+            return;
 
-		set.Add(conn);
-	}
+        string key = $"standalone:{identity.GetInstanceID()}";
+        CullGroup group = new()
+        {
+            Key = key,
+            Anchor = identity.transform,
+            HighDetailDistance = DefaultDistance,
+            MediumDetailDistance = DefaultDistance,
+            CullingDistance = DefaultDistance,
+            Hysteresis = DefaultHysteresis,
+        };
+        RegisterGroup(group);
+        AddIdentity(group, identity, 0, 0);
+    }
 
-	/// <summary>
-	/// Checks if the given connection is within culling distance of the identity's position.
-	/// </summary>
-	public static bool IsWithinCullingDistance(NetworkIdentity identity, NetworkConnection conn)
-	{
-		if (conn.identity == null)
-			return true;
+    public static void PrepareSchematicText(SchematicObject schematic, SchematicBlockData block, NetworkIdentity identity)
+    {
+        if (!IsEnabled || schematic == null || block == null || identity == null)
+            return;
 
-		float sqrDistance = (conn.identity.transform.position - identity.transform.position).sqrMagnitude;
-		return sqrDistance <= CullingDistance * CullingDistance;
-	}
+        Dictionary<string, object> properties = block.Properties ?? [];
+        string imageGroup = GetString(properties, "ImageGroup");
+        string text = GetString(properties, "Text");
+        if (string.IsNullOrWhiteSpace(imageGroup) && text.Length < 2048)
+            return;
 
-	/// <summary>
-	/// Starts the periodic culling update coroutine.
-	/// </summary>
-	public static void Start()
-	{
-		if (!IsEnabled)
-			return;
+        string keyPart = string.IsNullOrWhiteSpace(imageGroup) ? $"legacy:{block.ParentId}" : imageGroup;
+        string key = $"schematic:{schematic.GetInstanceID()}:{keyPart}";
+        if (!Groups.TryGetValue(key, out CullGroup? group))
+        {
+            group = new CullGroup
+            {
+                Key = key,
+                Anchor = identity.transform,
+                Owner = schematic,
+                HighDetailDistance = GetFloat(properties, "ImageHighDetailDistance", DefaultDistance),
+                MediumDetailDistance = GetFloat(properties, "ImageMediumDetailDistance", DefaultDistance),
+                CullingDistance = GetFloat(properties, "ImageCullingDistance", DefaultDistance),
+                Hysteresis = GetFloat(properties, "ImageCullingHysteresis", DefaultHysteresis),
+            };
+            RegisterGroup(group);
+        }
 
-		Stop();
-		_cullingCoroutine = Timing.RunCoroutine(CullingLoop());
-	}
+        AddIdentity(group, identity, GetInt(properties, "ImageLod", 0), GetInt(properties, "ImageTileOrder", block.ObjectId));
+    }
 
-	/// <summary>
-	/// Stops the culling coroutine and clears all tracking data.
-	/// </summary>
-	public static void Stop()
-	{
-		Timing.KillCoroutines(_cullingCoroutine);
-		CullableIdentities.Clear();
-		HiddenFrom.Clear();
-	}
+    public static void RegisterCullable(NetworkIdentity identity) => PrepareStandalone(identity);
 
-	/// <summary>
-	/// Periodic coroutine that updates object visibility for all players based on distance.
-	/// </summary>
-	private static IEnumerator<float> CullingLoop()
-	{
-		while (true)
-		{
-			yield return Timing.WaitForSeconds(CullingUpdateInterval);
+    public static bool IsCullable(NetworkIdentity identity) => identity != null && IdentityGroups.ContainsKey(identity);
 
-			foreach (Player player in Player.List)
-			{
-				try
-				{
-					UpdateCullingForPlayer(player);
-				}
-				catch (Exception e)
-				{
-					Logger.Error($"[CullingManager] Error updating culling for {player.Nickname}: {e}");
-				}
-			}
-		}
-	}
+    public static void UnregisterCullable(NetworkIdentity identity)
+    {
+        if (identity == null || !IdentityGroups.TryGetValue(identity, out CullGroup? group))
+            return;
+        IdentityGroups.Remove(identity);
 
-	/// <summary>
-	/// Updates which cullable objects are visible to the given player.
-	/// Shows objects that are now within range, hides objects that moved out of range.
-	/// </summary>
-	private static void UpdateCullingForPlayer(Player player)
-	{
-		if (player.Connection == null)
-			return;
+        foreach (List<CullEntry> entries in group.Lods.Values)
+            entries.RemoveAll(entry => entry.Identity == null || entry.Identity == identity);
+        if (group.Lods.Values.All(entries => entries.Count == 0))
+            RemoveGroup(group);
+    }
 
-		Vector3 playerPos = player.Position;
-		float sqrCullingDistance = CullingDistance * CullingDistance;
+    public static void UnregisterSchematic(SchematicObject schematic)
+    {
+        foreach (CullGroup group in Groups.Values.Where(group => group.Owner == schematic).ToArray())
+            RemoveGroup(group);
+    }
 
-		foreach (NetworkIdentity identity in CullableIdentities)
-		{
-			if (identity == null)
-				continue;
+    public static void Start()
+    {
+        Stop();
+        if (IsEnabled)
+            _cullingCoroutine = Timing.RunCoroutine(CullingLoop());
+    }
 
-			float sqrDistance = (playerPos - identity.transform.position).sqrMagnitude;
-			bool shouldBeVisible = sqrDistance <= sqrCullingDistance;
-			bool isHidden = HiddenFrom.TryGetValue(identity, out HashSet<NetworkConnection> hiddenSet) && hiddenSet.Contains(player.Connection);
+    public static void Stop()
+    {
+        Timing.KillCoroutines(_cullingCoroutine);
+        _cullingCoroutine = default;
+        RestoreAndClear();
+    }
 
-			if (shouldBeVisible && isHidden)
-			{
-				BypassCulling = true;
-				try
-				{
-					player.SpawnNetworkIdentity(identity);
-				}
-				finally
-				{
-					BypassCulling = false;
-				}
+    private static void RegisterGroup(CullGroup group) => Groups[group.Key] = group;
 
-				hiddenSet.Remove(player.Connection);
-			}
-			else if (!shouldBeVisible && !isHidden)
-			{
-				player.DestroyNetworkIdentity(identity);
-				MarkAsHidden(identity, player.Connection);
-			}
-		}
-	}
+    private static void AddIdentity(CullGroup group, NetworkIdentity identity, int lod, int order)
+    {
+        identity.visible = Visibility.ForceHidden;
+        if (!group.Lods.TryGetValue(lod, out List<CullEntry>? entries))
+            group.Lods[lod] = entries = [];
+        entries.Add(new CullEntry { Identity = identity, Order = order });
+        IdentityGroups[identity] = group;
+    }
+
+    private static void RemoveGroup(CullGroup group)
+    {
+        Groups.Remove(group.Key);
+        foreach (List<CullEntry> entries in group.Lods.Values)
+            foreach (CullEntry entry in entries)
+                IdentityGroups.Remove(entry.Identity);
+        foreach (Dictionary<CullGroup, ViewState> states in PlayerStates.Values)
+            states.Remove(group);
+    }
+
+    private static IEnumerator<float> CullingLoop()
+    {
+        float nextScan = 0f;
+        while (IsEnabled)
+        {
+            bool scan = Time.realtimeSinceStartup >= nextScan;
+            if (scan)
+                nextScan = Time.realtimeSinceStartup + UpdateInterval;
+
+            foreach (Player player in Player.List)
+            {
+                if (player.Connection is not NetworkConnectionToClient connection || !connection.isReady)
+                    continue;
+                try
+                {
+                    UpdatePlayer(player, connection, scan);
+                }
+                catch (Exception e)
+                {
+                    if (Time.realtimeSinceStartup >= _nextErrorLogTime)
+                    {
+                        _nextErrorLogTime = Time.realtimeSinceStartup + 30f;
+                        Logger.Error($"[CullingManager] Update failed (further errors suppressed for 30s): {e}");
+                    }
+                }
+            }
+
+            NetworkConnectionToClient[] disconnected = PlayerStates.Keys
+                .Where(connection => connection == null || !connection.isReady)
+                .ToArray();
+            foreach (NetworkConnectionToClient connection in disconnected)
+                PlayerStates.Remove(connection);
+
+            yield return Timing.WaitForSeconds(SendInterval);
+        }
+
+        RestoreAndClear();
+    }
+
+    private static void RestoreAndClear()
+    {
+        foreach (NetworkIdentity identity in IdentityGroups.Keys.ToArray())
+        {
+            if (identity == null)
+                continue;
+            identity.visible = Visibility.Default;
+            if (NetworkServer.active && identity.isServer)
+                NetworkServer.RebuildObservers(identity, true);
+        }
+        foreach (CullGroup group in Groups.Values.ToArray())
+            RemoveGroup(group);
+        Groups.Clear();
+        IdentityGroups.Clear();
+        PlayerStates.Clear();
+        _nextErrorLogTime = 0f;
+    }
+
+    private static void UpdatePlayer(Player player, NetworkConnectionToClient connection, bool scan)
+    {
+        if (!PlayerStates.TryGetValue(connection, out Dictionary<CullGroup, ViewState>? states))
+            PlayerStates[connection] = states = [];
+
+        if (scan)
+        {
+            foreach (CullGroup group in Groups.Values.ToArray())
+            {
+                if (group.Anchor == null)
+                    continue;
+                if (!states.TryGetValue(group, out ViewState? state))
+                    states[group] = state = new ViewState();
+
+                float squaredDistance = (player.Position - group.AnchorPosition).sqrMagnitude;
+                state.LastSquaredDistance = squaredDistance;
+                int current = state.IsTransitioning ? state.TargetLod : state.CurrentLod;
+                int requested = group.SelectLod(squaredDistance, current);
+                if (!state.IsTransitioning && requested != state.CurrentLod)
+                    BeginTransition(group, state, requested);
+                else if (state.IsTransitioning && requested != state.TargetLod)
+                    state.RequestedLod = requested;
+            }
+        }
+
+        int budget = ObjectsPerUpdate;
+        foreach (KeyValuePair<CullGroup, ViewState> pair in states
+            .Where(pair => pair.Value.IsTransitioning)
+            .OrderBy(pair => pair.Value.LastSquaredDistance))
+        {
+            if (budget <= 0)
+                break;
+            budget -= ProcessTransition(pair.Key, pair.Value, connection, budget);
+        }
+    }
+
+    private static void BeginTransition(CullGroup group, ViewState state, int targetLod)
+    {
+        state.TargetLod = targetLod;
+        state.RequestedLod = targetLod;
+        state.Showing = group.GetLod(targetLod);
+        state.Hiding = group.GetLod(state.CurrentLod);
+        state.ShowIndex = 0;
+        state.HideIndex = 0;
+        state.IsTransitioning = true;
+    }
+
+    private static int ProcessTransition(CullGroup group, ViewState state, NetworkConnectionToClient connection, int budget)
+    {
+        int processed = 0;
+        while (processed < budget && state.ShowIndex < state.Showing.Count)
+        {
+            if (Show(state.Showing[state.ShowIndex++], connection))
+                processed++;
+        }
+        while (processed < budget && state.ShowIndex >= state.Showing.Count && state.HideIndex < state.Hiding.Count)
+        {
+            if (Hide(state.Hiding[state.HideIndex++], connection))
+                processed++;
+        }
+
+        if (state.ShowIndex >= state.Showing.Count && state.HideIndex >= state.Hiding.Count)
+        {
+            state.CurrentLod = state.TargetLod;
+            state.IsTransitioning = false;
+            if (state.RequestedLod != state.CurrentLod)
+                BeginTransition(group, state, state.RequestedLod);
+        }
+        return processed;
+    }
+
+    private static bool Show(CullEntry entry, NetworkConnectionToClient connection)
+    {
+        NetworkIdentity identity = entry.Identity;
+        if (identity == null || !identity.isServer || identity.observers.ContainsKey(connection.connectionId))
+            return false;
+        identity.AddObserver(connection);
+        return true;
+    }
+
+    private static bool Hide(CullEntry entry, NetworkConnectionToClient connection)
+    {
+        NetworkIdentity identity = entry.Identity;
+        if (identity == null || !identity.isServer || !identity.observers.ContainsKey(connection.connectionId))
+            return false;
+        connection.RemoveFromObserving(identity, false);
+        identity.RemoveObserver(connection);
+        return true;
+    }
+
+    private static string GetString(Dictionary<string, object> properties, string key) =>
+        properties.TryGetValue(key, out object? value) ? Convert.ToString(value) ?? string.Empty : string.Empty;
+
+    private static int GetInt(Dictionary<string, object> properties, string key, int fallback) =>
+        properties.TryGetValue(key, out object? value) ? Convert.ToInt32(value) : fallback;
+
+    private static float GetFloat(Dictionary<string, object> properties, string key, float fallback) =>
+        properties.TryGetValue(key, out object? value) ? Convert.ToSingle(value) : fallback;
 }

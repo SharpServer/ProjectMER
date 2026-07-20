@@ -29,6 +29,8 @@ public class MapEditorObject : MonoBehaviour
 		return this;
 	}
 
+	internal void MoveToMap(string mapName) => MapName = mapName;
+
 	public virtual void UpdateObjectAndCopies()
 	{
 		Map.IsDirty = true;

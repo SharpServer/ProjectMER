@@ -10,14 +10,26 @@ public class Config
 	[Description("Whether the object will be auto selected when spawning it.")]
 	public bool AutoSelect { get; set; } = true;
 
-	[Description("Enables distance-based culling for heavy objects (TextToys, Primitives). When enabled, these objects are only sent to players within CullingDistance, drastically reducing network traffic and client load for maps with large images.")]
-	public bool EnableCulling { get; set; } = false;
+	[Description("Enables ProjectMER's TextToy/image culling.")]
+	public bool EnableTextToyOptimization { get; set; } = true;
+
+	[Description("Enables distance-based culling for TextToys. When enabled, large text images are only sent to players within CullingDistance.")]
+	public bool EnableCulling { get; set; } = true;
 
 	[Description("The maximum distance (in meters) at which cullable objects are visible to players. Objects beyond this distance are not sent to the client.")]
-	public float CullingDistance { get; set; } = 50f;
+	public float CullingDistance { get; set; } = 60f;
 
 	[Description("How often (in seconds) the culling system checks and updates object visibility for all players.")]
-	public float CullingUpdateInterval { get; set; } = 2f;
+	public float CullingUpdateInterval { get; set; } = 0.25f;
+
+	[Description("How often queued object spawn/hide messages are drained.")]
+	public float CullingSendInterval { get; set; } = 0.05f;
+
+	[Description("Maximum TextToy/native identities shown or hidden per player during one send tick.")]
+	public int CullingObjectsPerUpdate { get; set; } = 2;
+
+	[Description("Extra distance required before an already visible object is hidden. Prevents repeated loading at distance boundaries.")]
+	public float CullingHysteresis { get; set; } = 10f;
 
 	[Description(
 	"\n" +

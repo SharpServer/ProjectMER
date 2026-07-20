@@ -74,6 +74,7 @@ public class ProjectMER : Plugin<Config>
 		CustomHandlersManager.RegisterEventsHandler(ToolGunEventsHandler);
 		CustomHandlersManager.RegisterEventsHandler(AcionOnEventHandlers);
 		CustomHandlersManager.RegisterEventsHandler(PickupEventsHandler);
+		CullingManager.Start();
 
 		if (Config!.EnableFileSystemWatcher)
 		{

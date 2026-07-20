@@ -1,7 +1,9 @@
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using AdminToys;
+using MEC;
 using Mirror;
 using ProjectMER.Events.Handlers;
 using ProjectMER.Features;
@@ -254,6 +256,53 @@ public class SchematicObject : MonoBehaviour
         return this;
     }
 
+    /// <summary>
+    /// Init の分散実行版。ブロック生成を複数フレームへ分散し、数千～数万ブロック規模の
+    /// スキマティック（例: PersonnelOfficeZone は34080ブロック）が単一フレームで
+    /// メインスレッドを長時間占有するのを避ける。
+    /// </summary>
+    public IEnumerator<float> InitStaggered(SchematicObjectDataList data, float frameBudgetMs, Action<SchematicObject>? onComplete = null)
+    {
+        Name = Path.GetFileNameWithoutExtension(data.Path);
+        DirectoryPath = data.Path;
+
+        ObjectFromId = new Dictionary<int, Transform>(data.Blocks.Count + 1)
+        {
+            { data.RootObjectId, transform },
+        };
+
+        // GameObject を作らず、親→子の生成順序だけを先に決定する（O(n)）。
+        // 元の CreateRecursiveFromID は List.Find/FindAll を各ノードで呼ぶ O(n^2) 構造だったため、
+        // ここで辞書ベースの走査に置き換え、大規模スキマティックでのアルゴリズム的な遅さも解消する。
+        List<SchematicBlockData> creationOrder = BuildCreationOrder(data.RootObjectId, data.Blocks);
+
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
+        foreach (SchematicBlockData block in creationOrder)
+        {
+            Transform parentTransform = ObjectFromId.TryGetValue(block.ParentId, out Transform parentTf) ? parentTf : transform;
+            CreateObject(block, parentTransform);
+
+            if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
+            {
+                yield return Timing.WaitForOneFrame;
+                stopwatch.Restart();
+            }
+        }
+
+        AddRigidbodies();
+        AddTeleports();
+        AddTriggerPoints();
+        AddEventInvokeMarkers();
+        AddObjectPrefabs();
+        AddDoors();
+        AddAnimators();
+
+        Schematic.OnSchematicSpawned(new(this, Name));
+
+        onComplete?.Invoke(this);
+    }
+
     private void CreateRecursiveFromID(int id, List<SchematicBlockData> blocks, Transform parentGameObject)
     {
         Transform childGameObjectTransform = CreateObject(blocks.Find(c => c.ObjectId == id), parentGameObject) ?? transform;
@@ -266,6 +315,61 @@ public class SchematicObject : MonoBehaviour
 
             CreateRecursiveFromID(block.ObjectId, blocks, childGameObjectTransform);
         }
+    }
+
+    /// <summary>
+    /// <see cref="CreateRecursiveFromID"/> と同じ親→子の訪問順序を、GameObject を作らずに
+    /// 辞書ベースの走査（O(n)）で求める。
+    /// </summary>
+    private static List<SchematicBlockData> BuildCreationOrder(int rootId, List<SchematicBlockData> blocks)
+    {
+        var byId = new Dictionary<int, SchematicBlockData>(blocks.Count);
+        var childrenByParent = new Dictionary<int, List<SchematicBlockData>>(blocks.Count);
+
+        foreach (SchematicBlockData block in blocks)
+        {
+            // List.Find は重複 ObjectId のうち最初の要素を返すため、辞書側も先勝ちにして挙動を一致させる。
+            if (!byId.ContainsKey(block.ObjectId))
+                byId[block.ObjectId] = block;
+
+            if (!childrenByParent.TryGetValue(block.ParentId, out List<SchematicBlockData> siblings))
+            {
+                siblings = new List<SchematicBlockData>();
+                childrenByParent[block.ParentId] = siblings;
+            }
+
+            siblings.Add(block);
+        }
+
+        var parentSchematics = new HashSet<int>(
+            blocks.Where(bl => bl.BlockType == BlockType.Schematic).Select(bl => bl.ObjectId));
+
+        var result = new List<SchematicBlockData>(blocks.Count);
+        var pending = new Stack<int>();
+        pending.Push(rootId);
+
+        while (pending.Count > 0)
+        {
+            int id = pending.Pop();
+
+            if (byId.TryGetValue(id, out SchematicBlockData self))
+                result.Add(self);
+
+            if (!childrenByParent.TryGetValue(id, out List<SchematicBlockData> children))
+                continue;
+
+            // Stack は LIFO なので、元の再帰と同じ左から右の訪問順序を保つには逆順に積む。
+            for (int i = children.Count - 1; i >= 0; i--)
+            {
+                SchematicBlockData child = children[i];
+                if (parentSchematics.Contains(child.ParentId))
+                    continue;
+
+                pending.Push(child.ObjectId);
+            }
+        }
+
+        return result;
     }
 
     private Transform? CreateObject(SchematicBlockData block, Transform parentTransform)

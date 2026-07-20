@@ -89,24 +89,36 @@ public class MapSchematic
 		return this;
 	}
 
-	public void Reload()
+	public void Reload(IReadOnlyList<string>? prioritySchematicNames = null)
 	{
 		DestroySpawnedObjects();
 
-		foreach (Action spawnAction in EnumerateSpawnActions())
+		foreach (Action spawnAction in EnumeratePreSchematicSpawnActions())
+			RunSpawnAction(spawnAction);
+		foreach (KeyValuePair<string, SerializableSchematic> kVP in OrderSchematicsByPriority(prioritySchematicNames))
+			RunSpawnAction(() => SpawnObject(kVP.Key, kVP.Value));
+		foreach (Action spawnAction in EnumeratePostSchematicSpawnActions())
+			RunSpawnAction(spawnAction);
+		foreach (Action spawnAction in EnumerateFinalSpawnActions())
 			RunSpawnAction(spawnAction);
 	}
 
 	/// <summary>
 	/// Reload の分散実行版。1フレームの処理時間が <paramref name="frameBudgetMs"/> を超えたら
 	/// 次のフレームへ持ち越す。スポーン順は <see cref="Reload"/> と同一。
+	/// Schematics はブロック生成自体も複数フレームへ分散する
+	/// （PersonnelOfficeZone など数万ブロック規模のスキマティックが1回のスポーンで
+	/// メインスレッドを長時間占有するのを避けるため）。
+	/// <paramref name="prioritySchematicNames"/> に指定した SchematicName は他の Schematics より先に処理される
+	/// （待機場など WaitingForPlayers 中にプレイヤーへ見える場所を早く仕上げるため）。
 	/// </summary>
-	public IEnumerator<float> ReloadStaggered(float frameBudgetMs)
+	public IEnumerator<float> ReloadStaggered(float frameBudgetMs, IReadOnlyList<string>? prioritySchematicNames = null)
 	{
 		DestroySpawnedObjects();
 
 		Stopwatch stopwatch = Stopwatch.StartNew();
-		foreach (Action spawnAction in EnumerateSpawnActions())
+
+		foreach (Action spawnAction in EnumeratePreSchematicSpawnActions())
 		{
 			RunSpawnAction(spawnAction);
 
@@ -116,6 +128,83 @@ public class MapSchematic
 				stopwatch.Restart();
 			}
 		}
+
+		foreach (KeyValuePair<string, SerializableSchematic> kVP in OrderSchematicsByPriority(prioritySchematicNames))
+		{
+			IEnumerator<float> spawn = SpawnSchematicStaggered(kVP.Key, kVP.Value, frameBudgetMs);
+			while (spawn.MoveNext())
+				yield return spawn.Current;
+
+			if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
+			{
+				yield return Timing.WaitForOneFrame;
+				stopwatch.Restart();
+			}
+		}
+
+		foreach (Action spawnAction in EnumeratePostSchematicSpawnActions())
+		{
+			RunSpawnAction(spawnAction);
+
+			if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
+			{
+				yield return Timing.WaitForOneFrame;
+				stopwatch.Restart();
+			}
+		}
+
+		foreach (Action spawnAction in EnumerateFinalSpawnActions())
+		{
+			RunSpawnAction(spawnAction);
+
+			if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
+			{
+				yield return Timing.WaitForOneFrame;
+				stopwatch.Restart();
+			}
+		}
+	}
+
+	// 1オブジェクトの失敗でマップ全体のロードが中断しないようにする（RunSpawnAction のコルーチン版）
+	private IEnumerator<float> SpawnSchematicStaggered(string id, SerializableSchematic serializableObject, float frameBudgetMs)
+	{
+		List<Room> rooms = serializableObject.GetRooms();
+
+		foreach (Room room in rooms)
+		{
+			if (serializableObject.Index >= 0 && serializableObject.Index != room.GetRoomIndex())
+				continue;
+
+			GameObject? resultGameObject = null;
+			IEnumerator<float> spawn = serializableObject.SpawnOrUpdateObjectStaggered(room, frameBudgetMs, go => resultGameObject = go);
+
+			while (true)
+			{
+				bool moved;
+				try
+				{
+					moved = spawn.MoveNext();
+				}
+				catch (Exception e)
+				{
+					Logger.Error($"[{Name}] Failed to spawn a schematic map object '{id}': {e}");
+					break;
+				}
+
+				if (!moved)
+					break;
+
+				yield return spawn.Current;
+			}
+
+			if (resultGameObject == null)
+				continue;
+
+			MapEditorObject mapEditorObject = resultGameObject.AddComponent<MapEditorObject>().Init(serializableObject, Name, id, room);
+			SpawnedObjects.Add(mapEditorObject);
+		}
+
+		ListPool<Room>.Shared.Return(rooms);
 	}
 
 	private void DestroySpawnedObjects()
@@ -139,7 +228,40 @@ public class MapSchematic
 		}
 	}
 
-	private IEnumerable<Action> EnumerateSpawnActions()
+	/// <summary>
+	/// <paramref name="priorityNames"/> に含まれる SchematicName（先勝ち、リスト順）を先に、
+	/// 残りを元の登録順で返す。
+	/// </summary>
+	private IEnumerable<KeyValuePair<string, SerializableSchematic>> OrderSchematicsByPriority(
+		IReadOnlyList<string>? priorityNames)
+	{
+		if (priorityNames == null || priorityNames.Count == 0)
+		{
+			foreach (KeyValuePair<string, SerializableSchematic> kVP in Schematics)
+				yield return kVP;
+			yield break;
+		}
+
+		var remaining = new List<KeyValuePair<string, SerializableSchematic>>(Schematics);
+
+		foreach (string priorityName in priorityNames)
+		{
+			for (int i = 0; i < remaining.Count; i++)
+			{
+				if (!string.Equals(remaining[i].Value.SchematicName, priorityName, StringComparison.OrdinalIgnoreCase))
+					continue;
+
+				yield return remaining[i];
+				remaining.RemoveAt(i);
+				i--;
+			}
+		}
+
+		foreach (KeyValuePair<string, SerializableSchematic> kVP in remaining)
+			yield return kVP;
+	}
+
+	private IEnumerable<Action> EnumeratePreSchematicSpawnActions()
 	{
 		foreach (KeyValuePair<string, SerializablePrimitive> kVP in Primitives)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
@@ -159,8 +281,6 @@ public class MapSchematic
 			};
 		foreach (KeyValuePair<string, SerializableWorkstation> kVP in Workstations)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
-		foreach (KeyValuePair<string, SerializableItemSpawnpoint> kVP in ItemSpawnpoints)
-			yield return () => SpawnObject(kVP.Key, kVP.Value);
 		foreach (KeyValuePair<string, SerializablePlayerSpawnpoint> kVP in PlayerSpawnpoints)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
 		foreach (KeyValuePair<string, SerializableCapybara> kVP in Capybaras)
@@ -169,8 +289,10 @@ public class MapSchematic
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
 		foreach (KeyValuePair<string, SerializableInteractable> kVP in Interactables)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
-		foreach (KeyValuePair<string, SerializableSchematic> kVP in Schematics)
-			yield return () => SpawnObject(kVP.Key, kVP.Value);
+	}
+
+	private IEnumerable<Action> EnumeratePostSchematicSpawnActions()
+	{
 		foreach (KeyValuePair<string, SerializableScp079Camera> kVP in Scp079Cameras)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
 		foreach (KeyValuePair<string, SerializableShootingTarget> kVP in ShootingTargets)
@@ -184,6 +306,17 @@ public class MapSchematic
 				SpawnObject(kVP.Key, kVP.Value);
 			};
 		foreach (KeyValuePair<string, SerializableWaypoint> kVP in Waypoints)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+	}
+
+	/// <summary>
+	/// ItemSpawnpoint（Pickup 生成、CustomItem 解決を伴う）と各種 Marker 類
+	/// （ObjectPrefabMarkers 等、Slafight 側ブリッジで追加のスキマティック生成を誘発しうる）は、
+	/// 部屋・スキマティックなど見た目の骨格が整ってから最後に処理する。
+	/// </summary>
+	private IEnumerable<Action> EnumerateFinalSpawnActions()
+	{
+		foreach (KeyValuePair<string, SerializableItemSpawnpoint> kVP in ItemSpawnpoints)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
 		foreach (KeyValuePair<string, SerializableCustomTriggerPoint> kVP in CustomTriggerPoints)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);

@@ -16,8 +16,8 @@ public class Config
 	[Description("Enables distance-based culling for TextToys. When enabled, large text images are only sent to players within CullingDistance.")]
 	public bool EnableCulling { get; set; } = true;
 
-	[Description("The maximum distance (in meters) at which cullable objects are visible to players. Objects beyond this distance are not sent to the client.")]
-	public float CullingDistance { get; set; } = 60f;
+	[Description("The maximum distance (in meters) at which cullable objects are visible to players. Objects beyond this distance are not sent to the client. Per-block 'ImageCullingDistance' (set automatically by the image-to-TextToy tool based on image size, roughly 18-30) overrides this for TextToy images; this value is only the fallback for cullables without that property.")]
+	public float CullingDistance { get; set; } = 24f;
 
 	[Description("How often (in seconds) the culling system checks and updates object visibility for all players.")]
 	public float CullingUpdateInterval { get; set; } = 0.25f;
@@ -29,7 +29,10 @@ public class Config
 	public int CullingObjectsPerUpdate { get; set; } = 2;
 
 	[Description("Extra distance required before an already visible object is hidden. Prevents repeated loading at distance boundaries.")]
-	public float CullingHysteresis { get; set; } = 10f;
+	public float CullingHysteresis { get; set; } = 4f;
+
+	[Description("Schematic names (as used in the map's schematic_name field) that should be spawned first during a staggered map load, in the given order. Useful for prioritizing schematics visible during waiting-for-players (e.g. the surface/spawn area) so players see the finished area sooner instead of waiting for the whole map to finish loading.")]
+	public List<string> PrioritySchematics { get; set; } = [];
 
 	[Description("Seconds a LOD downgrade (including a full cull) must be continuously requested before it is applied. Upgrades toward higher detail always apply immediately. Prevents a player lingering near a boundary from repeatedly triggering the expensive full re-parse/re-mesh that a fresh show/LOD switch causes.")]
 	public float CullingDowngradeDelay { get; set; } = 1.5f;
@@ -37,8 +40,8 @@ public class Config
 	[Description("If enabled, a multi-LOD cullable group (e.g. a TextToy image with LODs) never fully despawns while within CullingHardCullDistance - it downgrades to its lowest-detail LOD instead of hiding completely. This avoids the full re-parse/re-mesh cost of a fresh show when a player hovers around the culling boundary. Groups with only one LOD tier are unaffected (they still fully cull at CullingDistance+CullingHysteresis).")]
 	public bool CullingPersistLowestLod { get; set; } = true;
 
-	[Description("Distance (in meters) beyond which a persisted lowest-LOD object is fully culled even with CullingPersistLowestLod enabled.")]
-	public float CullingHardCullDistance { get; set; } = 150f;
+	[Description("Distance (in meters) beyond which a persisted lowest-LOD object is fully culled even with CullingPersistLowestLod enabled. Can be overridden per TextToy block via the 'ImageHardCullDistance' property (same way 'ImageCullingDistance' overrides CullingDistance).")]
+	public float CullingHardCullDistance { get; set; } = 60f;
 
 	[Description(
 	"\n" +

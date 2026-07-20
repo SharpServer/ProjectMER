@@ -61,7 +61,7 @@ public static class MapUtils
 	{
 		MapSchematic map = GetMapData(mapName);
 		UnloadMap(mapName);
-		map.Reload();
+		map.Reload(GetPrioritySchematicNames());
 
 		LoadedMaps.Add(mapName, map);
 	}
@@ -69,6 +69,7 @@ public static class MapUtils
 	/// <summary>
 	/// マップを複数フレームへ分散してロードする（1フレームの処理時間ストールを避ける）。
 	/// ロード開始時点で <see cref="LoadedMaps"/> に登録され、SpawnedObjects は徐々に増える。
+	/// <see cref="Configs.Config.PrioritySchematics"/> に指定したスキマティックは他より先に処理される。
 	/// </summary>
 	public static CoroutineHandle LoadMapStaggered(string mapName, float frameBudgetMs = DefaultLoadFrameBudgetMs)
 	{
@@ -83,7 +84,7 @@ public static class MapUtils
 
 	private static IEnumerator<float> RunStaggeredLoad(string mapName, MapSchematic map, float frameBudgetMs)
 	{
-		IEnumerator<float> reload = map.ReloadStaggered(frameBudgetMs);
+		IEnumerator<float> reload = map.ReloadStaggered(frameBudgetMs, GetPrioritySchematicNames());
 		while (true)
 		{
 			// ロード中にアンロード / 別ロードへ差し替えられたら中断する
@@ -99,6 +100,9 @@ public static class MapUtils
 		StaggeredLoads.Remove(mapName);
 		Logger.Debug($"Staggered load of map {mapName} completed ({map.SpawnedObjects.Count} objects).");
 	}
+
+	private static List<string> GetPrioritySchematicNames()
+		=> ProjectMER.Singleton?.Config?.PrioritySchematics ?? [];
 
 	public static bool UnloadMap(string mapName)
 	{

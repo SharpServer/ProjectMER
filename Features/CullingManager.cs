@@ -159,6 +159,13 @@ public static class CullingManager
         string key = $"schematic:{schematic.GetInstanceID()}:{keyPart}";
         if (!Groups.TryGetValue(key, out CullGroup? group))
         {
+            float cullingDistance = GetFloat(properties, "ImageCullingDistance", DefaultDistance);
+            // ImageHardCullDistance が明示されていればそれを使う。未指定ならグローバル既定値。
+            // どちらの場合も cullingDistance を下回らないようにする（Hard は Culling より遠い前提のため）。
+            float hardCullDistance = Math.Max(
+                cullingDistance,
+                GetFloat(properties, "ImageHardCullDistance", DefaultHardCullDistance));
+
             group = new CullGroup
             {
                 Key = key,
@@ -166,10 +173,10 @@ public static class CullingManager
                 Owner = schematic,
                 HighDetailDistance = GetFloat(properties, "ImageHighDetailDistance", DefaultDistance),
                 MediumDetailDistance = GetFloat(properties, "ImageMediumDetailDistance", DefaultDistance),
-                CullingDistance = GetFloat(properties, "ImageCullingDistance", DefaultDistance),
+                CullingDistance = cullingDistance,
                 Hysteresis = GetFloat(properties, "ImageCullingHysteresis", DefaultHysteresis),
                 PersistLowestLod = PersistLowestLod,
-                HardCullDistance = DefaultHardCullDistance,
+                HardCullDistance = hardCullDistance,
             };
             RegisterGroup(group);
         }

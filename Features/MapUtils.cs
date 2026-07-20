@@ -1,3 +1,4 @@
+using MEC;
 using ProjectMER.Features.Objects;
 using ProjectMER.Features.Serializable;
 using ProjectMER.Features.Serializable.Schematics;
@@ -9,6 +10,11 @@ namespace ProjectMER.Features;
 public static class MapUtils
 {
 	public const string UntitledMapName = "Untitled";
+
+	/// <summary>分散ロードの1フレームあたり処理時間バジェット（ミリ秒）。</summary>
+	public const float DefaultLoadFrameBudgetMs = 8f;
+
+	private static readonly Dictionary<string, CoroutineHandle> StaggeredLoads = [];
 
 	public static MapSchematic UntitledMap => LoadedMaps.GetOrAdd(UntitledMapName, () => new(UntitledMapName));
 
@@ -60,8 +66,48 @@ public static class MapUtils
 		LoadedMaps.Add(mapName, map);
 	}
 
+	/// <summary>
+	/// マップを複数フレームへ分散してロードする（1フレームの処理時間ストールを避ける）。
+	/// ロード開始時点で <see cref="LoadedMaps"/> に登録され、SpawnedObjects は徐々に増える。
+	/// </summary>
+	public static CoroutineHandle LoadMapStaggered(string mapName, float frameBudgetMs = DefaultLoadFrameBudgetMs)
+	{
+		MapSchematic map = GetMapData(mapName);
+		UnloadMap(mapName);
+		LoadedMaps.Add(mapName, map);
+
+		CoroutineHandle handle = Timing.RunCoroutine(RunStaggeredLoad(mapName, map, frameBudgetMs));
+		StaggeredLoads[mapName] = handle;
+		return handle;
+	}
+
+	private static IEnumerator<float> RunStaggeredLoad(string mapName, MapSchematic map, float frameBudgetMs)
+	{
+		IEnumerator<float> reload = map.ReloadStaggered(frameBudgetMs);
+		while (true)
+		{
+			// ロード中にアンロード / 別ロードへ差し替えられたら中断する
+			if (!LoadedMaps.TryGetValue(mapName, out MapSchematic current) || current != map)
+				yield break;
+
+			if (!reload.MoveNext())
+				break;
+
+			yield return reload.Current;
+		}
+
+		StaggeredLoads.Remove(mapName);
+		Logger.Debug($"Staggered load of map {mapName} completed ({map.SpawnedObjects.Count} objects).");
+	}
+
 	public static bool UnloadMap(string mapName)
 	{
+		if (StaggeredLoads.TryGetValue(mapName, out CoroutineHandle staggeredHandle))
+		{
+			Timing.KillCoroutines(staggeredHandle);
+			StaggeredLoads.Remove(mapName);
+		}
+
 		if (!LoadedMaps.ContainsKey(mapName))
 			return false;
 

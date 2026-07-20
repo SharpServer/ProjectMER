@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using LabApi.Features.Wrappers;
+using MEC;
 using NorthwoodLib.Pools;
 using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Objects;
@@ -89,44 +91,108 @@ public class MapSchematic
 
 	public void Reload()
 	{
+		DestroySpawnedObjects();
+
+		foreach (Action spawnAction in EnumerateSpawnActions())
+			RunSpawnAction(spawnAction);
+	}
+
+	/// <summary>
+	/// Reload の分散実行版。1フレームの処理時間が <paramref name="frameBudgetMs"/> を超えたら
+	/// 次のフレームへ持ち越す。スポーン順は <see cref="Reload"/> と同一。
+	/// </summary>
+	public IEnumerator<float> ReloadStaggered(float frameBudgetMs)
+	{
+		DestroySpawnedObjects();
+
+		Stopwatch stopwatch = Stopwatch.StartNew();
+		foreach (Action spawnAction in EnumerateSpawnActions())
+		{
+			RunSpawnAction(spawnAction);
+
+			if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
+			{
+				yield return Timing.WaitForOneFrame;
+				stopwatch.Restart();
+			}
+		}
+	}
+
+	private void DestroySpawnedObjects()
+	{
 		foreach (MapEditorObject mapEditorObject in SpawnedObjects)
 			mapEditorObject.Destroy();
 
 		SpawnedObjects.Clear();
+	}
 
-		Primitives.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		Lights.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		Doors.ForEach(kVP =>
+	// 1オブジェクトの失敗でマップ全体のロードが中断しないようにする
+	private void RunSpawnAction(Action spawnAction)
+	{
+		try
 		{
-			Door? vanillaDoor = Door.Get(kVP.Key);
-			if (vanillaDoor != null)
+			spawnAction();
+		}
+		catch (Exception e)
+		{
+			Logger.Error($"[{Name}] Failed to spawn a map object: {e}");
+		}
+	}
+
+	private IEnumerable<Action> EnumerateSpawnActions()
+	{
+		foreach (KeyValuePair<string, SerializablePrimitive> kVP in Primitives)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableLight> kVP in Lights)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableDoor> kVP in Doors)
+			yield return () =>
 			{
-				kVP.Value.SetupDoor(vanillaDoor.Base);
-				return;
-			}
+				Door? vanillaDoor = Door.Get(kVP.Key);
+				if (vanillaDoor != null)
+				{
+					kVP.Value.SetupDoor(vanillaDoor.Base);
+					return;
+				}
 
-			SpawnObject(kVP.Key, kVP.Value);
-		});
-		Workstations.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		ItemSpawnpoints.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		PlayerSpawnpoints.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		Capybaras.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		Texts.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		Interactables.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		Schematics.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		Scp079Cameras.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		ShootingTargets.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		Teleports.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		Lockers.ForEach(kVP =>
-		{
-			kVP.Value._prevType = kVP.Value.LockerType;
-			SpawnObject(kVP.Key, kVP.Value);
-		});
-		Waypoints.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		CustomTriggerPoints.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		ObjectPrefabMarkers.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		PrefabMarkers.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
-		EventInvokeMarkers.ForEach(kVP => SpawnObject(kVP.Key, kVP.Value));
+				SpawnObject(kVP.Key, kVP.Value);
+			};
+		foreach (KeyValuePair<string, SerializableWorkstation> kVP in Workstations)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableItemSpawnpoint> kVP in ItemSpawnpoints)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializablePlayerSpawnpoint> kVP in PlayerSpawnpoints)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableCapybara> kVP in Capybaras)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableText> kVP in Texts)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableInteractable> kVP in Interactables)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableSchematic> kVP in Schematics)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableScp079Camera> kVP in Scp079Cameras)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableShootingTarget> kVP in ShootingTargets)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableTeleport> kVP in Teleports)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableLocker> kVP in Lockers)
+			yield return () =>
+			{
+				kVP.Value._prevType = kVP.Value.LockerType;
+				SpawnObject(kVP.Key, kVP.Value);
+			};
+		foreach (KeyValuePair<string, SerializableWaypoint> kVP in Waypoints)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableCustomTriggerPoint> kVP in CustomTriggerPoints)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableObjectPrefabMarker> kVP in ObjectPrefabMarkers)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializablePrefabMarker> kVP in PrefabMarkers)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+		foreach (KeyValuePair<string, SerializableEventInvokeMarker> kVP in EventInvokeMarkers)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
 	}
 
 	public void SpawnObject<T>(string id, T serializableObject) where T : SerializableObject

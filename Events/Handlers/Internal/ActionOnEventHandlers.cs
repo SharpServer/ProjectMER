@@ -85,7 +85,7 @@ public class ActionOnEventHandlers : CustomEventsHandler
 		foreach (string mapName in allMaps)
 		{
 			if (Regex.IsMatch(mapName, WildCardToRegular(argument)))
-				MapUtils.LoadMap(mapName);
+				MapUtils.LoadMapStaggered(mapName);
 		}
 	}
 

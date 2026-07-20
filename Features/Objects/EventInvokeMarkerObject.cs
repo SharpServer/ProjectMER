@@ -9,8 +9,10 @@ public class EventInvokeMarkerObject : MonoBehaviour
 {
     private const float ExitMargin = 0.15f;
     private static readonly float[] BodySampleHeights = [0f, 0.9f, 1.7f];
-    private readonly HashSet<ReferenceHub> _insidePlayers = [];
-    private readonly Dictionary<ReferenceHub, Vector3> _previousPositions = [];
+    // 破棄済み ReferenceHub は GetHashCode() が gameObject に触れて NRE になるため、
+    // ハッシュキーには PlayerId (int) を使う。
+    private readonly HashSet<int> _insidePlayers = [];
+    private readonly Dictionary<int, Vector3> _previousPositions = [];
 
     public string Id { get; set; } = string.Empty;
     public string Tag { get; set; } = string.Empty;
@@ -29,18 +31,19 @@ public class EventInvokeMarkerObject : MonoBehaviour
         float radius = Mathf.Max(0.01f, Distance);
         float exitRadius = radius + ExitMargin;
         Vector3 center = transform.position;
-		HashSet<ReferenceHub> readyHubs = [];
+		HashSet<int> readyIds = [];
 
         foreach (Player player in Player.ReadyList)
         {
             ReferenceHub hub = player.ReferenceHub;
 			if (hub == null)
 				continue;
-			readyHubs.Add(hub);
+			int playerId = player.PlayerId;
+			readyIds.Add(playerId);
 
             Vector3 current = player.Position;
-            Vector3 previous = _previousPositions.TryGetValue(hub, out Vector3 value) ? value : current;
-            _previousPositions[hub] = current;
+            Vector3 previous = _previousPositions.TryGetValue(playerId, out Vector3 value) ? value : current;
+            _previousPositions[playerId] = current;
 
             bool isNear = false;
             foreach (float height in BodySampleHeights)
@@ -54,7 +57,7 @@ public class EventInvokeMarkerObject : MonoBehaviour
             }
             if (isNear)
             {
-                if (_insidePlayers.Add(hub))
+                if (_insidePlayers.Add(playerId))
                 {
                     Events.Handlers.EventInvokeMarker.OnInvoked(new EventInvokeMarkerInvokedEventArgs(player, this));
                     Events.Handlers.EventInvoke.Invoke(
@@ -65,15 +68,15 @@ public class EventInvokeMarkerObject : MonoBehaviour
             }
             else if (DistanceToVerticalBodySquared(center, current) > exitRadius * exitRadius)
             {
-                _insidePlayers.Remove(hub);
+                _insidePlayers.Remove(playerId);
             }
         }
 
-		_insidePlayers.RemoveWhere(hub => hub == null || !readyHubs.Contains(hub));
-        foreach (ReferenceHub hub in _previousPositions.Keys.ToArray())
+		_insidePlayers.RemoveWhere(id => !readyIds.Contains(id));
+        foreach (int id in _previousPositions.Keys.ToArray())
         {
-			if (hub == null || !readyHubs.Contains(hub))
-				_previousPositions.Remove(hub!);
+			if (!readyIds.Contains(id))
+				_previousPositions.Remove(id);
         }
     }
 

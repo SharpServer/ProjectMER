@@ -281,14 +281,22 @@ public class SchematicObject : MonoBehaviour
 			if (block.BlockType == BlockType.Text)
 				CullingManager.PrepareSchematicText(this, block, identity);
 
-			NetworkServer.Spawn(gameObject);
+			// Pickup.Create 等で既に Spawn 済み (netId != 0) のものを再 Spawn すると
+			// "already spawned" 警告が出るだけなのでスキップする
+			if (identity.netId == 0)
+				NetworkServer.Spawn(gameObject);
 		}
 
         SchematicBlock schematicBlock = gameObject.AddComponent<SchematicBlock>();
         schematicBlock.Init(this, block);
         _blocks.Add(schematicBlock);
 
-        ObjectFromId.Add(block.ObjectId, gameObject.transform);
+        // ObjectId が重複したデータでもマップロード全体を巻き込んで失敗させない
+        // (RootObjectId と衝突するケースも含む。最初に登録された Transform を優先する)
+        if (!ObjectFromId.ContainsKey(block.ObjectId))
+            ObjectFromId.Add(block.ObjectId, gameObject.transform);
+        else
+            Logger.Warn($"Schematic \"{Name}\" contains a duplicate ObjectId {block.ObjectId} (block \"{block.Name}\"). Keeping the first registered block.");
 
         if (block.BlockType != BlockType.Light && TryGetAnimatorController(block.AnimatorName, out RuntimeAnimatorController animatorController))
             _animators.Add(gameObject, animatorController);

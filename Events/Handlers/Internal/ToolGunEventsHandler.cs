@@ -27,7 +27,11 @@ public class ToolGunEventsHandler : CustomEventsHandler
 			foreach (Player player in Player.List)
 			{
 				if (!player.CurrentItem.IsToolGun(out ToolGunItem _) && !ToolGunHandler.TryGetSelectedMapObject(player, out MapEditorObject _))
+				{
+					if (ToolGunHsmHud.IsAvailable)
+						ToolGunHsmHud.TryHide(player);
 					continue;
+				}
 
 				string hud;
 				try
@@ -39,6 +43,9 @@ public class ToolGunEventsHandler : CustomEventsHandler
 					Logger.Error(e);
 					hud = "ERROR: Check server console";
 				}
+
+				if (ToolGunHsmHud.IsAvailable && ToolGunHsmHud.TryShow(player, hud))
+					continue;
 
 				player.SendHint(hud, 0.25f);
 			}

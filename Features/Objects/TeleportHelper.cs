@@ -68,7 +68,12 @@ internal static class TeleportHelper
 				continue;
 			}
 
-			// Prevent the destination from immediately bouncing the player back out.
+			// Prevent the destination from immediately bouncing the player back out, and also
+			// re-ignore this pad for the player: if the destination's exit position still
+			// overlaps this trigger (common for closely-placed/paired teleporters), the next
+			// Tick would otherwise see them "freshly entering" here once only the cooldown
+			// gate remains, causing a fast A<->B ping-pong.
+			ignoredPlayers.Add(hub);
 			target.IgnoredPlayers.Add(hub);
 
 			Teleport(player, target.Transform, target.Trigger, source.TeleportCooldown);

@@ -58,6 +58,24 @@ public static class ReflectionExtensions
 				}
 				yield return $"{property.Name}: <noparse>{StringBuilderPool.Shared.ToStringReturn(sb)}</noparse>";
 			}
+			else if (typeof(IDictionary).IsAssignableFrom(property.PropertyType))
+			{
+				IDictionary dictionary = (IDictionary)property.GetValue(instance);
+				if (dictionary.Count == 0)
+				{
+					yield return $"{property.Name}: <color=yellow><b>0</b></color>";
+					continue;
+				}
+
+				StringBuilder sb = StringBuilderPool.Shared.Rent();
+				foreach (DictionaryEntry entry in dictionary)
+					sb.Append($"{entry.Key}={MapUtils.GetColoredString(entry.Value?.ToString() ?? string.Empty)} ");
+
+				if (sb.Length > 0)
+					sb.Remove(sb.Length - 1, 1);
+
+				yield return $"{property.Name}: {StringBuilderPool.Shared.ToStringReturn(sb)}";
+			}
 			else if (typeof(ICollection).IsAssignableFrom(property.PropertyType))
 			{
 				StringBuilder sb = StringBuilderPool.Shared.Rent();

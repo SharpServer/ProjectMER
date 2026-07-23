@@ -8,6 +8,7 @@ using LabApi.Features.Wrappers;
 using NorthwoodLib.Pools;
 using ProjectMER.Features;
 using ProjectMER.Features.Extensions;
+using ProjectMER.Features.Interfaces;
 using ProjectMER.Features.Objects;
 using ProjectMER.Features.Serializable;
 using ProjectMER.Features.ToolGun;
@@ -57,6 +58,10 @@ public class Modify : ICommand
 
 		if (arguments.Count == 0)
 		{
+			List<PropertyInfo> displayProperties = instance is SerializableObjectPrefabMarker
+				? properties.Where(x => x.Name != nameof(SerializableObjectPrefabMarker.Options)).ToList()
+				: properties;
+
 			StringBuilder sb = StringBuilderPool.Shared.Rent();
 			sb.AppendLine();
 			sb.Append("Object properties:");
@@ -66,10 +71,16 @@ public class Modify : ICommand
 			sb.AppendLine();
 			sb.Append($"ID: {MapUtils.GetColoredString(mapEditorObject.Id)}");
 			sb.AppendLine();
-			foreach (string property in properties.GetColoredProperties(instance))
+			foreach (string property in displayProperties.GetColoredProperties(instance))
 			{
 				sb.Append(property);
 				sb.AppendLine();
+			}
+
+			if (instance is SerializableObjectPrefabMarker prefabMarker)
+			{
+				sb.AppendLine();
+				sb.Append(BuildPrefabOptionInfo(prefabMarker));
 			}
 
 			response = StringBuilderPool.Shared.ToStringReturn(sb);
@@ -82,7 +93,8 @@ public class Modify : ICommand
 		else if (propertyName == "ID")
 			return HandleId(out response);
 
-		PropertyInfo? foundProperty = properties.FirstOrDefault(x => x.Name.ToUpperInvariant().Contains(propertyName));
+		PropertyInfo? foundProperty = properties.FirstOrDefault(x => x.Name.Equals(arguments.At(0), StringComparison.OrdinalIgnoreCase))
+			?? properties.FirstOrDefault(x => x.Name.ToUpperInvariant().Contains(propertyName));
 		if (foundProperty == null)
 		{
 			response = $"There isn't any object property that contains \"{arguments.At(0)}\" in it's name!";
@@ -438,5 +450,44 @@ public class Modify : ICommand
 			response = string.Empty;
 			return true;
 		}
+	}
+
+	private static string BuildPrefabOptionInfo(SerializableObjectPrefabMarker marker)
+	{
+		StringBuilder sb = StringBuilderPool.Shared.Rent();
+		sb.Append("PrefabType options:");
+		sb.AppendLine();
+
+		IObjectPrefabInfoProvider? provider = ObjectPrefabInfoRegistry.Provider;
+		IReadOnlyList<ObjectPrefabOptionInfo> definitions = Array.Empty<ObjectPrefabOptionInfo>();
+		string error = string.Empty;
+		if (provider is null || string.IsNullOrWhiteSpace(marker.PrefabType) ||
+			!provider.TryGetOptionDefinitions(marker.PrefabType, out definitions, out error))
+		{
+			sb.Append(provider is null
+				? "(No ObjectPrefab info provider registered; showing raw Options only)"
+				: $"(Could not resolve options for PrefabType '{marker.PrefabType}': {error})");
+			sb.AppendLine();
+
+			foreach (KeyValuePair<string, string> option in marker.Options)
+			{
+				sb.Append($"- {option.Key} = {MapUtils.GetColoredString(option.Value)}");
+				sb.AppendLine();
+			}
+
+			return StringBuilderPool.Shared.ToStringReturn(sb);
+		}
+
+		foreach (ObjectPrefabOptionInfo definition in definitions)
+		{
+			string currentValue = marker.Options.TryGetValue(definition.Name, out string raw) ? raw : definition.DefaultValue ?? string.Empty;
+			sb.Append($"- {definition.Name}:{definition.ValueType}" +
+				(definition.ConstraintDescription != null ? $"({definition.ConstraintDescription})" : string.Empty) +
+				$" = <color=yellow><b>{currentValue}</b></color>" +
+				(definition.DefaultValue != null ? $" [default: {definition.DefaultValue}]" : string.Empty));
+			sb.AppendLine();
+		}
+
+		return StringBuilderPool.Shared.ToStringReturn(sb);
 	}
 }

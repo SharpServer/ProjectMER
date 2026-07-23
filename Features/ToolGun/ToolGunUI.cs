@@ -19,20 +19,12 @@ public static class ToolGunUI
 
 		sb.Append("<font=\"LiberationSans SDF\">");
 
-		int offset = 0;
 		object instance = null!;
 		List<PropertyInfo> properties = [];
 		if (ToolGunHandler.TryGetSelectedMapObject(player, out MapEditorObject mapEditorObject) && mapEditorObject != null)
 		{
 			instance = mapEditorObject.GetType().GetField("Base").GetValue(mapEditorObject);
 			properties = instance.GetType().GetProperties().ToList();
-			offset = properties.Count - properties.Count(x => Attribute.IsDefined(x, typeof(YamlIgnoreAttribute))) + 2 + 2;
-		}
-
-		for (int i = 0; i < 36 - offset; i++)
-		{
-			sb.Append("<size=50%> </size>");
-			sb.AppendLine();
 		}
 
 		if (mapEditorObject != null)
@@ -51,11 +43,11 @@ public static class ToolGunUI
 				sb.AppendLine();
 			}
 
-		if (offset > 0)
-			sb.AppendLine();
-
 		if (!player.CurrentItem.IsToolGun(out ToolGunItem toolGun))
+		{
+			sb.Append("</font>");
 			return StringBuilderPool.Shared.ToStringReturn(sb);
+		}
 
 		sb.Append($"<size=50%>");
 		sb.Append(GetToolGunModeString(player, toolGun));

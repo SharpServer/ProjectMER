@@ -241,7 +241,8 @@ public class SchematicObject : MonoBehaviour
             { data.RootObjectId, transform },
         };
 
-        CreateRecursiveFromID(data.RootObjectId, data.Blocks, transform);
+        var parentBlockIds = new HashSet<int>(data.Blocks.Select(block => block.ParentId));
+        CreateRecursiveFromID(data.RootObjectId, data.Blocks, transform, parentBlockIds);
 
         AddRigidbodies();
         AddTeleports();
@@ -275,13 +276,14 @@ public class SchematicObject : MonoBehaviour
         // 元の CreateRecursiveFromID は List.Find/FindAll を各ノードで呼ぶ O(n^2) 構造だったため、
         // ここで辞書ベースの走査に置き換え、大規模スキマティックでのアルゴリズム的な遅さも解消する。
         List<SchematicBlockData> creationOrder = BuildCreationOrder(data.RootObjectId, data.Blocks);
+        var parentBlockIds = new HashSet<int>(data.Blocks.Select(block => block.ParentId));
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 
         foreach (SchematicBlockData block in creationOrder)
         {
             Transform parentTransform = ObjectFromId.TryGetValue(block.ParentId, out Transform parentTf) ? parentTf : transform;
-            CreateObject(block, parentTransform);
+            CreateObject(block, parentTransform, !parentBlockIds.Contains(block.ObjectId));
 
             if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
             {
@@ -303,9 +305,17 @@ public class SchematicObject : MonoBehaviour
         onComplete?.Invoke(this);
     }
 
-    private void CreateRecursiveFromID(int id, List<SchematicBlockData> blocks, Transform parentGameObject)
+    private void CreateRecursiveFromID(
+        int id,
+        List<SchematicBlockData> blocks,
+        Transform parentGameObject,
+        HashSet<int> parentBlockIds)
     {
-        Transform childGameObjectTransform = CreateObject(blocks.Find(c => c.ObjectId == id), parentGameObject) ?? transform;
+        SchematicBlockData self = blocks.Find(c => c.ObjectId == id);
+        Transform childGameObjectTransform = CreateObject(
+            self,
+            parentGameObject,
+            self != null && !parentBlockIds.Contains(self.ObjectId)) ?? transform;
         int[] parentSchematics = blocks.Where(bl => bl.BlockType == BlockType.Schematic).Select(bl => bl.ObjectId).ToArray();
 
         foreach (SchematicBlockData block in blocks.FindAll(c => c.ParentId == id))
@@ -313,7 +323,7 @@ public class SchematicObject : MonoBehaviour
             if (parentSchematics.Contains(block.ParentId))
                 continue;
 
-            CreateRecursiveFromID(block.ObjectId, blocks, childGameObjectTransform);
+            CreateRecursiveFromID(block.ObjectId, blocks, childGameObjectTransform, parentBlockIds);
         }
     }
 
@@ -372,12 +382,12 @@ public class SchematicObject : MonoBehaviour
         return result;
     }
 
-    private Transform? CreateObject(SchematicBlockData block, Transform parentTransform)
+    private Transform? CreateObject(SchematicBlockData block, Transform parentTransform, bool isLeaf)
     {
         if (block == null)
             return null;
 
-        GameObject gameObject = block.Create(this, parentTransform);
+        GameObject gameObject = block.Create(this, parentTransform, isLeaf);
 
         // NetworkIdentity を持たない GO（確率外れ Pickup / 遅延スポーナー等）は Spawn しない
 		if (gameObject.TryGetComponent(out NetworkIdentity identity))

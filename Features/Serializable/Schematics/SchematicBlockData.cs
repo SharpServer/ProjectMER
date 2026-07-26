@@ -36,12 +36,23 @@ public class SchematicBlockData
 
 	public virtual Dictionary<string, object> Properties { get; set; }
 
-	public GameObject Create(SchematicObject schematicObject, Transform parentTransform)
+	public GameObject Create(SchematicObject schematicObject, Transform parentTransform, bool isLeaf)
 	{
+		Vector3 localScale = Scale;
+		Quaternion localRotation = Quaternion.Euler(Rotation);
+		PrimitiveType primitiveType = default;
+
+		if (BlockType == BlockType.Primitive)
+		{
+			primitiveType = (PrimitiveType)Convert.ToInt32(Properties["PrimitiveType"]);
+			if (isLeaf)
+				NormalizeLeafPrimitive(ref primitiveType, ref localRotation, ref localScale);
+		}
+
 		GameObject gameObject = BlockType switch
 		{
 			BlockType.Empty => CreateEmpty(),
-			BlockType.Primitive => CreatePrimitive(),
+			BlockType.Primitive => CreatePrimitive(primitiveType),
 			BlockType.Light => CreateLight(),
 			BlockType.Pickup => CreatePickup(schematicObject),
 			BlockType.Workstation => CreateWorkstation(),
@@ -56,7 +67,7 @@ public class SchematicBlockData
 
 		Transform transform = gameObject.transform;
 		transform.SetParent(parentTransform);
-		transform.SetLocalPositionAndRotation(Position, Quaternion.Euler(Rotation));
+		transform.SetLocalPositionAndRotation(Position, localRotation);
 		
 		if (BlockType == BlockType.Waypoint)
 			gameObject.GetComponent<WaypointToy>().NetworkBoundsSize = Scale;
@@ -64,7 +75,7 @@ public class SchematicBlockData
 			transform.localScale = BlockType switch
 			{
 				BlockType.Empty when Scale == Vector3.zero => Vector3.one,
-				_ => Scale
+				_ => localScale
 			};
 
 		if (gameObject.TryGetComponent(out AdminToyBase adminToyBase))
@@ -93,11 +104,11 @@ public class SchematicBlockData
 		return primitive.gameObject;
 	}
 
-	private GameObject CreatePrimitive()
+	private GameObject CreatePrimitive(PrimitiveType primitiveType)
 	{
 		PrimitiveObjectToy primitive = GameObject.Instantiate(PrefabManager.PrimitiveObject);
 
-		primitive.NetworkPrimitiveType = (PrimitiveType)Convert.ToInt32(Properties["PrimitiveType"]);
+		primitive.NetworkPrimitiveType = primitiveType;
 		primitive.NetworkMaterialColor = Properties["Color"].ToString().GetColorFromString();
 
 		PrimitiveFlags primitiveFlags;
@@ -116,6 +127,42 @@ public class SchematicBlockData
 		primitive.NetworkPrimitiveFlags = primitiveFlags;
 
 		return primitive.gameObject;
+	}
+
+	private static void NormalizeLeafPrimitive(
+		ref PrimitiveType primitiveType,
+		ref Quaternion rotation,
+		ref Vector3 scale)
+	{
+		if (primitiveType == PrimitiveType.Plane)
+		{
+			primitiveType = PrimitiveType.Quad;
+			rotation *= Quaternion.Euler(90f, 0f, 0f);
+			scale = new Vector3(scale.x * 10f, scale.z * 10f, scale.y);
+		}
+
+		if (scale.x >= 0f && scale.y >= 0f && scale.z >= 0f)
+			return;
+
+		if (primitiveType == PrimitiveType.Quad)
+		{
+			// Quad is symmetric in its XY plane. Preserve the original normal when
+			// removing a negative thickness scale.
+			if (scale.z < 0f)
+				rotation *= Quaternion.Euler(180f, 0f, 0f);
+		}
+		else
+		{
+			// Two negative axes form an exact 180-degree rotation.
+			if (scale.x < 0f && scale.y < 0f && scale.z >= 0f)
+				rotation *= Quaternion.Euler(0f, 0f, 180f);
+			else if (scale.x < 0f && scale.y >= 0f && scale.z < 0f)
+				rotation *= Quaternion.Euler(0f, 180f, 0f);
+			else if (scale.x >= 0f && scale.y < 0f && scale.z < 0f)
+				rotation *= Quaternion.Euler(180f, 0f, 0f);
+		}
+
+		scale = new Vector3(Mathf.Abs(scale.x), Mathf.Abs(scale.y), Mathf.Abs(scale.z));
 	}
 
 	private GameObject CreateLight()

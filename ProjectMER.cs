@@ -74,6 +74,7 @@ public class ProjectMER : Plugin<Config>
 		CustomHandlersManager.RegisterEventsHandler(ToolGunEventsHandler);
 		CustomHandlersManager.RegisterEventsHandler(AcionOnEventHandlers);
 		CustomHandlersManager.RegisterEventsHandler(PickupEventsHandler);
+		PrimitiveOptimizationManager.Start();
 		CullingManager.Start();
 
 		if (Config!.EnableFileSystemWatcher)
@@ -112,9 +113,11 @@ public class ProjectMER : Plugin<Config>
 
 	public override void Disable()
 	{
-		Singleton = null!;
-		_harmony.UnpatchAll();
 		CullingManager.Stop();
+		// Plugin hot-unload is rare, but surviving schematics must remain valid after our
+		// client-only IDs disappear. Restore native objects even if this is a one-time burst.
+		PrimitiveOptimizationManager.Stop(restoreNative: true);
+		_harmony.UnpatchAll();
 
 		CustomHandlersManager.UnregisterEventsHandler(GenericEventsHandler);
 		CustomHandlersManager.UnregisterEventsHandler(ToolGunEventsHandler);
@@ -122,6 +125,7 @@ public class ProjectMER : Plugin<Config>
 		CustomHandlersManager.UnregisterEventsHandler(PickupEventsHandler);
 
 		_mapFileSystemWatcher?.Dispose();
+		Singleton = null!;
 	}
 
 	public override string Name => "ProjectMER";

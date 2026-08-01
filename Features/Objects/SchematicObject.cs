@@ -253,6 +253,7 @@ public class SchematicObject : MonoBehaviour
         AddAnimators();
 
         Schematic.OnSchematicSpawned(new(this, Name));
+        PrimitiveOptimizationManager.FinalizeSchematic(this);
 
         return this;
     }
@@ -301,6 +302,7 @@ public class SchematicObject : MonoBehaviour
         AddAnimators();
 
         Schematic.OnSchematicSpawned(new(this, Name));
+        PrimitiveOptimizationManager.FinalizeSchematic(this);
 
         onComplete?.Invoke(this);
     }
@@ -395,9 +397,12 @@ public class SchematicObject : MonoBehaviour
 			if (block.BlockType == BlockType.Text)
 				CullingManager.PrepareSchematicText(this, block, identity);
 
+            bool deferPrimitiveSpawn = gameObject.TryGetComponent(out PrimitiveObjectToy primitive) &&
+                PrimitiveOptimizationManager.TryDefer(this, primitive);
+
 			// Pickup.Create 等で既に Spawn 済み (netId != 0) のものを再 Spawn すると
 			// "already spawned" 警告が出るだけなのでスキップする
-			if (identity.netId == 0)
+            if (!deferPrimitiveSpawn && identity.netId == 0)
 				NetworkServer.Spawn(gameObject);
 		}
 
@@ -647,6 +652,7 @@ public class SchematicObject : MonoBehaviour
             return;
 
 		_isCleanedUp = true;
+        PrimitiveOptimizationManager.UnregisterSchematic(this);
 		CullingManager.UnregisterSchematic(this);
 
         // AnimationController の辞書から削除

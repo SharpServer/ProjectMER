@@ -1,12 +1,14 @@
 using System.Collections.Generic;
 using AdminToys;
 using LabApi.Features.Wrappers;
+using MEC;
 using Mirror;
 using ProjectMER.Events.Arguments;
 using ProjectMER.Events.Handlers;
 using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Objects;
 using UnityEngine;
+using Utf8Json;
 using PrimitiveObjectToy = AdminToys.PrimitiveObjectToy;
 
 namespace ProjectMER.Features.Serializable.Schematics;
@@ -64,6 +66,9 @@ public class SerializableSchematic : SerializableObject
 	public IEnumerator<float> SpawnOrUpdateObjectStaggered(Room? room, float frameBudgetMs, Action<GameObject?>? onComplete = null)
 	{
 		PrimitiveObjectToy schematic = UnityEngine.Object.Instantiate(PrefabManager.PrimitiveObject);
+		bool completed = false;
+		try
+		{
 		schematic.NetworkPrimitiveFlags = PrimitiveFlags.None;
 		schematic.NetworkMovementSmoothing = 60;
 
@@ -75,12 +80,42 @@ public class SerializableSchematic : SerializableObject
 		schematic.transform.SetPositionAndRotation(position, rotation);
 		schematic.transform.localScale = Scale;
 
-		if (!MapUtils.TryGetSchematicDataByName(SchematicName, out SchematicObjectDataList? data) || data == null)
+			Task<MapUtils.SchematicDataLoadResult> loadTask = MapUtils.LoadSchematicDataForStaggeredAsync(SchematicName);
+			while (!loadTask.IsCompleted)
+				yield return Timing.WaitForOneFrame;
+
+			MapUtils.SchematicDataLoadResult loadResult;
+			try
 		{
-			GameObject.Destroy(schematic.gameObject);
+				loadResult = loadTask.GetAwaiter().GetResult();
+			}
+			catch (Exception)
+			{
+				// Preserve TryGetSchematicDataByName's failure behavior if the worker itself cannot return a result.
+				onComplete?.Invoke(null);
+				yield break;
+			}
+
+			if (loadResult.Error is JsonParsingException error)
+			{
+				string message = $"Failed to load schematic data: File {SchematicName}.json has JSON errors!\n{error.ToString().Split('\n')[0]}";
+				Logger.Error(message);
+			}
+
+			SchematicObjectDataList? data = loadResult.Data;
+			if (data == null)
+			{
+				onComplete?.Invoke(null);
+				yield break;
+			}
+
+			if (loadResult.DirectoryPath == null)
+			{
 			onComplete?.Invoke(null);
 			yield break;
 		}
+
+			data.Path = loadResult.DirectoryPath;
 
 		SchematicSpawningEventArgs ev = new(data, SchematicName);
 		Schematic.OnSchematicSpawning(ev);
@@ -88,7 +123,6 @@ public class SerializableSchematic : SerializableObject
 
 		if (!ev.IsAllowed)
 		{
-			GameObject.Destroy(schematic.gameObject);
 			onComplete?.Invoke(null);
 			yield break;
 		}
@@ -97,9 +131,29 @@ public class SerializableSchematic : SerializableObject
 		SchematicObject schematicObject = schematic.gameObject.AddComponent<SchematicObject>();
 
 		IEnumerator<float> init = schematicObject.InitStaggered(data, frameBudgetMs);
+			try
+			{
 		while (init.MoveNext())
 			yield return init.Current;
+			}
+			finally
+			{
+				init.Dispose();
+			}
 
+			completed = true;
 		onComplete?.Invoke(schematic.gameObject);
+		}
+		finally
+		{
+			if (!completed && schematic != null && schematic.gameObject != null)
+			{
+				NetworkIdentity identity = schematic.netIdentity;
+				if (NetworkServer.active && identity != null && identity.isServer)
+					NetworkServer.Destroy(schematic.gameObject);
+				else
+					GameObject.Destroy(schematic.gameObject);
+			}
+		}
 	}
 }

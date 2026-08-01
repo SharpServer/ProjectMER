@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using YamlDotNet.Serialization;
 
 namespace ProjectMER.Configs;
 
@@ -12,6 +13,63 @@ public class Config
 
 	[Description("Enables ProjectMER's TextToy/image culling.")]
 	public bool EnableTextToyOptimization { get; set; } = true;
+
+	[YamlMember(Alias = "enable_primitive_optimization")]
+	[Description("Enables ProjectMER's primitive optimization. Do not enable this while the external MEROptimizer plugin is active; applies from the next round.")]
+	// External MEROptimizer must not run simultaneously; this setting applies on the next round.
+	public bool EnablePrimitiveOptimization { get; set; } = false;
+
+	[YamlMember(Alias = "primitive_culling_distance")]
+	[Description("Maximum distance (in meters) at which primitive objects are considered visible.")]
+	public float PrimitiveCullingDistance { get; set; } = 50f;
+
+	[YamlMember(Alias = "primitive_schematic_culling_distances")]
+	[Description("Optional per-schematic primitive culling distance overrides.")]
+	public Dictionary<string, float> PrimitiveSchematicCullingDistances { get; set; } = [];
+
+	[YamlMember(Alias = "primitive_cluster_size")]
+	[Description("Spatial cell size (in meters) used to cluster primitive objects.")]
+	public float PrimitiveClusterSize { get; set; } = 2.5f;
+
+	[YamlMember(Alias = "primitive_cluster_max_objects")]
+	[Description("Maximum number of primitive objects assigned to one spatial cluster.")]
+	public int PrimitiveClusterMaxObjects { get; set; } = 100;
+
+	[YamlMember(Alias = "primitive_always_visible_size")]
+	[Description("Primitive objects at or above this size remain visible regardless of distance.")]
+	public float PrimitiveAlwaysVisibleSize { get; set; } = 10f;
+
+	[YamlMember(Alias = "primitive_objects_per_update")]
+	[Description("Maximum primitive objects processed per player update.")]
+	public int PrimitiveObjectsPerUpdate { get; set; } = 20;
+
+	[YamlMember(Alias = "primitive_global_objects_per_update")]
+	[Description("Maximum primitive objects processed globally per update.")]
+	public int PrimitiveGlobalObjectsPerUpdate { get; set; } = 128;
+
+	[YamlMember(Alias = "culling_global_objects_per_update")]
+	[Description("Maximum culling objects processed globally per update.")]
+	public int CullingGlobalObjectsPerUpdate { get; set; } = 64;
+
+	[YamlMember(Alias = "culling_spatial_cell_size")]
+	[Description("Spatial cell size (in meters) used by culling.")]
+	public float CullingSpatialCellSize { get; set; } = 50f;
+
+	[YamlMember(Alias = "primitive_finalize_frame_budget_ms")]
+	[Description("Maximum time (in milliseconds) spent finalizing primitive optimization work in one frame.")]
+	public float PrimitiveFinalizeFrameBudgetMs { get; set; } = 2f;
+
+	[YamlMember(Alias = "primitive_cluster_worker_count")]
+	[Description("Number of worker tasks used to build primitive clusters.")]
+	public int PrimitiveClusterWorkerCount { get; set; } = 2;
+
+	[YamlMember(Alias = "primitive_excluded_schematic_name_patterns")]
+	[Description("Schematic name patterns excluded from primitive optimization.")]
+	public List<string> PrimitiveExcludedSchematicNamePatterns { get; set; } = [];
+
+	[YamlMember(Alias = "primitive_assume_static_schematic_name_patterns")]
+	[Description("Schematic name patterns whose otherwise-unmarked primitives may be treated as static. Only use this for schematics that are never moved, animated, or visibility-controlled at runtime.")]
+	public List<string> PrimitiveAssumeStaticSchematicNamePatterns { get; set; } = [];
 
 	[Description("Enables distance-based culling for TextToys. When enabled, large text images are only sent to players within CullingDistance.")]
 	public bool EnableCulling { get; set; } = true;

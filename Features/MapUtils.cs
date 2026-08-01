@@ -16,6 +16,22 @@ public static class MapUtils
 
 	private static readonly Dictionary<string, CoroutineHandle> StaggeredLoads = [];
 
+	internal sealed class SchematicDataLoadResult
+	{
+		public SchematicDataLoadResult(SchematicObjectDataList? data, Exception? error, string? directoryPath = null)
+		{
+			Data = data;
+			Error = error;
+			DirectoryPath = directoryPath;
+		}
+
+		public SchematicObjectDataList? Data { get; }
+
+		public Exception? Error { get; }
+
+		public string? DirectoryPath { get; }
+	}
+
 	public static MapSchematic UntitledMap => LoadedMaps.GetOrAdd(UntitledMapName, () => new(UntitledMapName));
 
 	public static Dictionary<string, MapSchematic> LoadedMaps { get; private set; } = [];
@@ -85,6 +101,8 @@ public static class MapUtils
 	private static IEnumerator<float> RunStaggeredLoad(string mapName, MapSchematic map, float frameBudgetMs)
 	{
 		IEnumerator<float> reload = map.ReloadStaggered(frameBudgetMs, GetPrioritySchematicNames());
+		try
+		{
 		while (true)
 		{
 			// ロード中にアンロード / 別ロードへ差し替えられたら中断する
@@ -95,6 +113,11 @@ public static class MapUtils
 				break;
 
 			yield return reload.Current;
+			}
+		}
+		finally
+		{
+			reload.Dispose();
 		}
 
 		StaggeredLoads.Remove(mapName);
@@ -224,6 +247,78 @@ public static class MapUtils
 		}
 
 		return data;
+	}
+
+	/// <summary>
+	/// Reads and deserializes schematic data for the staggered spawn path without blocking the main thread.
+	/// Path validation and any file relocation remain on the calling thread; only the JSON read and parse are
+	/// executed by the worker task.
+	/// </summary>
+	internal static Task<SchematicDataLoadResult> LoadSchematicDataForStaggeredAsync(string schematicName)
+	{
+		string schematicDirPath;
+		string schematicJsonPath;
+		string misplacedSchematicJsonPath;
+
+		try
+		{
+			schematicDirPath = Path.Combine(ProjectMER.SchematicsDir, schematicName);
+			schematicJsonPath = Path.Combine(schematicDirPath, $"{schematicName}.json");
+			misplacedSchematicJsonPath = schematicDirPath + ".json";
+
+			if (!Directory.Exists(schematicDirPath))
+			{
+				// Keep the same compatibility behavior as the synchronous loader for a loose JSON file.
+				if (File.Exists(misplacedSchematicJsonPath))
+				{
+					Directory.CreateDirectory(schematicDirPath);
+					File.Move(misplacedSchematicJsonPath, schematicJsonPath);
+				}
+				else
+				{
+					string error = $"Failed to load schematic data: Directory {schematicName} does not exist!";
+					Logger.Error(error);
+					return Task.FromResult(new SchematicDataLoadResult(null, null));
+				}
+			}
+
+			if (!File.Exists(schematicJsonPath))
+			{
+				// Same compatibility behavior when the directory exists but the JSON is still loose.
+				if (File.Exists(misplacedSchematicJsonPath))
+				{
+					File.Move(misplacedSchematicJsonPath, schematicJsonPath);
+				}
+				else
+				{
+					string error = $"Failed to load schematic data: File {schematicName}.json does not exist!";
+					Logger.Error(error);
+					return Task.FromResult(new SchematicDataLoadResult(null, null));
+				}
+			}
+		}
+		catch (Exception)
+		{
+			// TryGetSchematicDataByName suppresses filesystem errors; preserve that behavior for staggered loads.
+			return Task.FromResult(new SchematicDataLoadResult(null, null));
+		}
+
+		return Task.Run(() =>
+		{
+			try
+			{
+				// Do not move Unity/Mirror access into this task. These are the only expensive operations that run
+				// away from the main thread for the staggered spawn path.
+				SchematicObjectDataList data = JsonSerializer.Deserialize<SchematicObjectDataList>(File.ReadAllText(schematicJsonPath));
+				return new SchematicDataLoadResult(data, null, schematicDirPath);
+			}
+			catch (Exception error)
+			{
+				// Return the error so the MEC coroutine can observe/log it on the main thread. This also avoids an
+				// unobserved fault if the map is unloaded while the worker is still parsing.
+				return new SchematicDataLoadResult(null, error);
+			}
+		});
 	}
 
 	public static string[] GetAvailableSchematicNames() => Directory.GetFiles(ProjectMER.SchematicsDir, "*.json", SearchOption.AllDirectories).Select(Path.GetFileNameWithoutExtension).Where(x => !x.Contains('-')).ToArray();

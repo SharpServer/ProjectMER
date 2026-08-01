@@ -144,8 +144,15 @@ public class MapSchematic
 		foreach (KeyValuePair<string, SerializableSchematic> kVP in prioritySchematics)
 		{
 			IEnumerator<float> spawn = SpawnSchematicStaggered(kVP.Key, kVP.Value, frameBudgetMs);
+			try
+			{
 			while (spawn.MoveNext())
 				yield return spawn.Current;
+			}
+			finally
+			{
+				spawn.Dispose();
+			}
 
 			if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
 			{
@@ -168,8 +175,15 @@ public class MapSchematic
 		foreach (KeyValuePair<string, SerializableSchematic> kVP in remainingSchematics)
 		{
 			IEnumerator<float> spawn = SpawnSchematicStaggered(kVP.Key, kVP.Value, frameBudgetMs);
+			try
+			{
 			while (spawn.MoveNext())
 				yield return spawn.Current;
+			}
+			finally
+			{
+				spawn.Dispose();
+			}
 
 			if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
 			{
@@ -205,7 +219,8 @@ public class MapSchematic
 	private IEnumerator<float> SpawnSchematicStaggered(string id, SerializableSchematic serializableObject, float frameBudgetMs)
 	{
 		List<Room> rooms = serializableObject.GetRooms();
-
+		try
+		{
 		foreach (Room room in rooms)
 		{
 			if (serializableObject.Index >= 0 && serializableObject.Index != room.GetRoomIndex())
@@ -213,7 +228,8 @@ public class MapSchematic
 
 			GameObject? resultGameObject = null;
 			IEnumerator<float> spawn = serializableObject.SpawnOrUpdateObjectStaggered(room, frameBudgetMs, go => resultGameObject = go);
-
+				try
+				{
 			while (true)
 			{
 				bool moved;
@@ -231,6 +247,11 @@ public class MapSchematic
 					break;
 
 				yield return spawn.Current;
+					}
+				}
+				finally
+				{
+					spawn.Dispose();
 			}
 
 			if (resultGameObject == null)
@@ -239,8 +260,11 @@ public class MapSchematic
 			MapEditorObject mapEditorObject = resultGameObject.AddComponent<MapEditorObject>().Init(serializableObject, Name, id, room);
 			SpawnedObjects.Add(mapEditorObject);
 		}
-
+		}
+		finally
+		{
 		ListPool<Room>.Shared.Return(rooms);
+		}
 	}
 
 	private void DestroySpawnedObjects()

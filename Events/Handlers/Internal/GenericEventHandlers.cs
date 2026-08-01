@@ -1,4 +1,5 @@
 using LabApi.Events.Arguments.PlayerEvents;
+using LabApi.Events.Arguments.ServerEvents;
 using LabApi.Events.CustomHandlers;
 using MEC;
 using ProjectMER.Features;
@@ -12,6 +13,10 @@ public class GenericEventsHandler : CustomEventsHandler
 {
 	public override void OnServerWaitingForPlayers()
 	{
+		// 前ラウンドの synthetic netId を先に破棄してから、新しい世代を開始する。
+		CullingManager.Stop();
+		PrimitiveOptimizationManager.Stop();
+
 		PrefabManager.RegisterPrefabs();
 
 		MapUtils.LoadedMaps.Clear();
@@ -21,7 +26,25 @@ public class GenericEventsHandler : CustomEventsHandler
 		PickupEventsHandler.PickupUsesLeft.Clear();
 		PickupEventsHandler.CustomItemPickupUses.Clear();
 
+		PrimitiveOptimizationManager.Start();
 		CullingManager.Start();
+	}
+
+	public override void OnServerRoundEnded(RoundEndedEventArgs ev)
+	{
+		// Mirror の netId カウンタが次ラウンド用にリセットされる前に、
+		// クライアント専用 Primitive を全クライアントから除去する。RoundEnding は
+		// キャンセル可能なので、確定後の RoundEnded でマップ自体も明示的に破棄する。
+		CullingManager.Stop();
+		foreach (string mapName in MapUtils.LoadedMaps.Keys.ToArray())
+			MapUtils.UnloadMap(mapName);
+		PrimitiveOptimizationManager.Stop();
+	}
+
+	public override void OnServerShutdown()
+	{
+		CullingManager.Stop();
+		PrimitiveOptimizationManager.Stop();
 	}
 
 	public override void OnPlayerSpawning(PlayerSpawningEventArgs ev)

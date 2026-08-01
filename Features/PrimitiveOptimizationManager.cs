@@ -22,8 +22,10 @@ namespace ProjectMER.Features;
 public static class PrimitiveOptimizationManager
 {
     private const int MaxAlwaysVisiblePrimitivesPerSchematic = 16;
-    private const int NativeRestoreQuantum = 32;
-    private const int FinalizationQuantum = 8;
+    private const int NativeRestoreQuantum = 64;
+    private const int FinalizationQuantum = 64;
+    private const int FinalizationCommitChunkSize = 512;
+    private const int ClusterApplyQuantum = 32;
 
     private sealed class OptimizedPrimitive
     {
@@ -49,6 +51,7 @@ public static class PrimitiveOptimizationManager
         public Matrix4x4 OwnerWorldToLocal;
         public int Index;
         public readonly List<OptimizedPrimitive> Optimized = [];
+        public readonly List<ClusterInput> ClusterInputs = [];
     }
 
     private readonly struct ClusterInput
@@ -143,6 +146,12 @@ public static class PrimitiveOptimizationManager
     private static readonly Queue<FinalizeWork> FinalizationQueue = new();
     private static readonly Queue<OptimizedPrimitive> NativeRestoreQueue = new();
     private static readonly List<ClusterJob> ClusterJobs = [];
+    private static readonly Dictionary<SchematicObject, Dictionary<int, bool>> StaticHierarchySafety = [];
+    private static readonly Dictionary<SchematicObject, bool> AssumedStaticOwners = [];
+    private static readonly Dictionary<SchematicObject, bool> ExcludedOwners = [];
+    private static readonly Dictionary<SchematicObject, Dictionary<string, bool>> ExcludedPrimitiveNames = [];
+    private static readonly List<Transform> HierarchyScratch = [];
+    private static readonly List<Component> ComponentScratch = [];
 
     private static CoroutineHandle _finalizationCoroutine;
     private static CancellationTokenSource? _lifecycleCancellation;
@@ -168,9 +177,12 @@ public static class PrimitiveOptimizationManager
     /// true tells the caller to skip that spawn; no Unity work is performed on a worker thread.
     /// </summary>
     public static bool TryDefer(SchematicObject owner, PrimitiveObjectToy primitive)
+        => TryDefer(owner, primitive, primitive != null && primitive.transform.childCount == 0);
+
+    internal static bool TryDefer(SchematicObject owner, PrimitiveObjectToy primitive, bool isLeaf)
     {
         if (!IsMainThread() || owner == null || primitive == null || !NetworkServer.active || !IsEnabled ||
-            !IsStaticCandidate(owner, primitive))
+            !isLeaf || !IsStaticCandidate(owner, primitive))
             return false;
 
         if (!Pending.TryGetValue(owner, out List<PrimitiveObjectToy>? primitives))
@@ -187,6 +199,10 @@ public static class PrimitiveOptimizationManager
             return;
 
         Pending.Remove(owner);
+        // Components such as Animator/Rigidbody are attached after block creation. Rebuild the
+        // hierarchy cache during finalization so deferred candidates are validated against the
+        // completed runtime schematic, not the construction-time snapshot.
+        StaticHierarchySafety.Remove(owner);
         if (pending.Count == 0)
             return;
 
@@ -274,6 +290,10 @@ public static class PrimitiveOptimizationManager
         FinalizationQueue.Clear();
         NativeRestoreQueue.Clear();
         ClusterJobs.Clear();
+        StaticHierarchySafety.Clear();
+        AssumedStaticOwners.Clear();
+        ExcludedOwners.Clear();
+        ExcludedPrimitiveNames.Clear();
         _clusterWorkers = null;
     }
 
@@ -284,6 +304,10 @@ public static class PrimitiveOptimizationManager
             return;
 
         Pending.Remove(owner);
+        StaticHierarchySafety.Remove(owner);
+        AssumedStaticOwners.Remove(owner);
+        ExcludedOwners.Remove(owner);
+        ExcludedPrimitiveNames.Remove(owner);
         foreach (FinalizeWork work in FinalizationQueue.Where(work => work.Owner == owner).ToArray())
         {
             // Removing from the queue is done below; invalidating the generation makes a raced worker
@@ -365,9 +389,12 @@ public static class PrimitiveOptimizationManager
         float configuredBudgetMs = Math.Max(0.1f, CurrentConfig?.PrimitiveFinalizeFrameBudgetMs ?? 2f);
         float previousFrameMs = Time.unscaledDeltaTime * 1000f;
         float frameScale = previousFrameMs > 33f
-            ? 0.1f
-            : previousFrameMs > 25f ? 0.25f : previousFrameMs > 20f ? 0.5f : 1f;
-        float budgetMs = Math.Max(0.1f, configuredBudgetMs * frameScale);
+            ? 0.5f
+            : previousFrameMs > 25f ? 0.75f : previousFrameMs > 20f ? 0.9f : 1f;
+        // A near-zero budget makes initial payload generation take minutes because each primitive
+        // requires main-thread Unity/Mirror serialization. Preserve at least 1 ms of forward
+        // progress while still backing off from the configured ceiling on slow frames.
+        float budgetMs = Math.Max(Math.Min(1f, configuredBudgetMs), configuredBudgetMs * frameScale);
         Stopwatch stopwatch = Stopwatch.StartNew();
         // Failed plans already have disabled native primitives, so restoration takes priority over
         // applying or creating more optimized work.
@@ -421,9 +448,18 @@ public static class PrimitiveOptimizationManager
             }
 
             if (work.Index >= work.Candidates.Count)
-                CommitFinalization(work);
+            {
+                SubmitFinalizationBatch(work, allowAlwaysVisible: true);
+            }
             else
+            {
+                // Do not wait for every primitive in a huge schematic before anything becomes
+                // visible. Submit bounded batches to the cluster workers and continue validating
+                // the remainder on later frames.
+                if (work.Optimized.Count >= FinalizationCommitChunkSize)
+                    SubmitFinalizationBatch(work, allowAlwaysVisible: false);
                 FinalizationQueue.Enqueue(work);
+            }
         }
     }
 
@@ -446,6 +482,8 @@ public static class PrimitiveOptimizationManager
             WasRendererEnabled = primitive._renderer != null && primitive._renderer.enabled,
             WasColliderEnabled = primitive._collider != null && primitive._collider.enabled,
         };
+        int optimizedIndex = work.Optimized.Count;
+        ClusterInput clusterInput = CreateClusterInput(optimized, work.OwnerWorldToLocal, optimizedIndex);
 
         // The primitive stays in the hierarchy for collisions, scripts and SchematicBlock lookups.
         // Only its network behaviour and renderer are hibernated; non-collidable colliders are disabled.
@@ -456,9 +494,10 @@ public static class PrimitiveOptimizationManager
             primitive._collider.enabled = client.IsCollidable;
         primitive.transform.hasChanged = false;
         work.Optimized.Add(optimized);
+        work.ClusterInputs.Add(clusterInput);
     }
 
-    private static void CommitFinalization(FinalizeWork work)
+    private static void SubmitFinalizationBatch(FinalizeWork work, bool allowAlwaysVisible)
     {
         if (work.Optimized.Count == 0)
             return;
@@ -467,48 +506,50 @@ public static class PrimitiveOptimizationManager
         {
             foreach (OptimizedPrimitive item in work.Optimized)
                 item.Client.Invalidate();
+            work.Optimized.Clear();
+            work.ClusterInputs.Clear();
             return;
         }
 
-        state.Items.AddRange(work.Optimized);
-        ClusterInput[] inputs = BuildClusterInputs(work.Optimized, work.OwnerWorldToLocal);
+        List<OptimizedPrimitive> items = work.Optimized.ToList();
+        ClusterInput[] inputs = work.ClusterInputs.ToArray();
+        work.Optimized.Clear();
+        work.ClusterInputs.Clear();
+        state.Items.AddRange(items);
         CancellationToken token = _lifecycleCancellation?.Token ?? CancellationToken.None;
         Config? config = CurrentConfig;
         ClusterSettings settings = new(
             Math.Max(0.5f, config?.PrimitiveClusterSize ?? 8f),
             Math.Max(1, config?.PrimitiveClusterMaxObjects ?? 256),
-            Math.Max(0f, config?.PrimitiveAlwaysVisibleSize ?? 0f));
+            allowAlwaysVisible ? Math.Max(0f, config?.PrimitiveAlwaysVisibleSize ?? 0f) : 0f);
         Task<ClusterPlan> task = BuildClusterPlanAsync(inputs, settings, token);
         ClusterJobs.Add(new ClusterJob
         {
             Owner = work.Owner,
             Generation = work.Generation,
-            Items = work.Optimized,
+            Items = items,
             Task = task,
         });
     }
 
-    private static ClusterInput[] BuildClusterInputs(List<OptimizedPrimitive> items, Matrix4x4 ownerWorldToLocal)
+    private static ClusterInput CreateClusterInput(
+        OptimizedPrimitive item,
+        Matrix4x4 ownerWorldToLocal,
+        int index)
     {
-        ClusterInput[] inputs = new ClusterInput[items.Count];
-        for (int i = 0; i < items.Count; i++)
-        {
-            OptimizedPrimitive item = items[i];
-            PrimitiveObjectToy primitive = item.Primitive;
-            Vector3 worldPosition = primitive.transform.position;
-            Vector3 ownerLocalPosition = ownerWorldToLocal.MultiplyPoint3x4(worldPosition);
-            float halfDiagonal = primitive._collider != null
-                ? primitive._collider.bounds.extents.magnitude
-                : primitive.transform.lossyScale.magnitude * 0.5f;
-            inputs[i] = new ClusterInput(
-                i,
-                new PackedVector3(worldPosition),
-                new PackedVector3(ownerLocalPosition),
-                halfDiagonal,
-                item.Client.SizePriority,
-                item.Client.IsCollidable);
-        }
-        return inputs;
+        PrimitiveObjectToy primitive = item.Primitive;
+        Vector3 worldPosition = primitive.transform.position;
+        Vector3 ownerLocalPosition = ownerWorldToLocal.MultiplyPoint3x4(worldPosition);
+        float halfDiagonal = primitive._collider != null
+            ? primitive._collider.bounds.extents.magnitude
+            : primitive.transform.lossyScale.magnitude * 0.5f;
+        return new ClusterInput(
+            index,
+            new PackedVector3(worldPosition),
+            new PackedVector3(ownerLocalPosition),
+            halfDiagonal,
+            item.Client.SizePriority,
+            item.Client.IsCollidable);
     }
 
     private static async Task<ClusterPlan> BuildClusterPlanAsync(
@@ -662,7 +703,7 @@ public static class PrimitiveOptimizationManager
             ClusterPlan plan = job.Task.GetAwaiter().GetResult();
             int appliedThisPass = 0;
             while (job.ApplyIndex < plan.Clusters.Length &&
-                   appliedThisPass < 4 &&
+                   appliedThisPass < ClusterApplyQuantum &&
                    stopwatch.Elapsed.TotalMilliseconds < budgetMs)
             {
                 ClusterSpec cluster = plan.Clusters[job.ApplyIndex++];
@@ -695,7 +736,7 @@ public static class PrimitiveOptimizationManager
 			!primitive.PrimitiveFlags.HasFlag(PrimitiveFlags.Visible) || primitive._renderer == null ||
 			!primitive._renderer.enabled)
 			return false;
-		bool assumedStatic = MatchesAny(owner.Name, CurrentConfig?.PrimitiveAssumeStaticSchematicNamePatterns);
+		bool assumedStatic = IsAssumedStatic(owner);
 		if (!primitive.IsStatic && !assumedStatic)
 			return false;
 		// A schematic parented under a player or another runtime object is explicitly dynamic even if
@@ -719,50 +760,124 @@ public static class PrimitiveOptimizationManager
         // schematic is immutable. Avoid the otherwise expensive ancestor component scan for every
         // primitive in very large schematics; that scan can reduce staggered loading to one block
         // per frame and postpone gameplay objects for minutes.
-        if (!assumedStatic)
+        if (!assumedStatic && !IsStaticHierarchy(owner, primitive.transform))
+            return false;
+
+		return !IsExcluded(owner, primitive.name);
+    }
+
+    private static bool IsStaticHierarchy(SchematicObject owner, Transform leaf)
+    {
+        if (!StaticHierarchySafety.TryGetValue(owner, out Dictionary<int, bool>? cache))
+            StaticHierarchySafety[owner] = cache = [];
+
+        HierarchyScratch.Clear();
+        Transform? current = leaf;
+        bool chainSafe = true;
+        while (current != null)
         {
-            for (Transform? current = primitive.transform; current != null; current = current.parent)
+            int instanceId = current.GetInstanceID();
+            if (cache.TryGetValue(instanceId, out bool cached))
             {
-                if (current.TryGetComponent<Animator>(out _) || current.TryGetComponent<Rigidbody>(out _))
-                    return false;
-
-                foreach (Component component in current.GetComponents<Component>())
-                {
-                    if (component == null || component is Transform || component is Renderer || component is Collider ||
-                        component is MeshFilter || component is NetworkIdentity || component is AdminToyBase ||
-                        component is SchematicObject || component is SchematicBlock)
-                        continue;
-                    // Anything else (including non-MonoBehaviour runtime components such as audio,
-                    // particle or network transform components) can alter state after this snapshot.
-                    return false;
-                }
-
-                if (current == owner.transform)
-                    break;
+                chainSafe = cached;
+                break;
             }
+
+            HierarchyScratch.Add(current);
+            if (current == owner.transform)
+                break;
+            current = current.parent;
         }
 
-		return !IsExcluded(owner.Name, primitive.name);
+        if (current == null)
+            chainSafe = false;
+
+        for (int i = HierarchyScratch.Count - 1; i >= 0; i--)
+        {
+            Transform transform = HierarchyScratch[i];
+            chainSafe = chainSafe && IsLocallyStatic(transform);
+            cache[transform.GetInstanceID()] = chainSafe;
+        }
+
+        HierarchyScratch.Clear();
+        return cache.TryGetValue(leaf.GetInstanceID(), out bool result) && result;
+    }
+
+    private static bool IsLocallyStatic(Transform transform)
+    {
+        if (transform.TryGetComponent<Animator>(out _) || transform.TryGetComponent<Rigidbody>(out _))
+            return false;
+
+        ComponentScratch.Clear();
+        transform.GetComponents(ComponentScratch);
+        foreach (Component component in ComponentScratch)
+        {
+            if (component == null || component is Transform || component is Renderer || component is Collider ||
+                component is MeshFilter || component is NetworkIdentity || component is AdminToyBase ||
+                component is SchematicObject || component is SchematicBlock)
+                continue;
+            // Anything else (including audio, particle or runtime movement components) can alter
+            // state after the cached snapshot and therefore must remain a native object.
+            return false;
+        }
+        ComponentScratch.Clear();
+        return true;
     }
 
     private static int FloorToInt(float value) => (int)Math.Floor(value);
 
-	private static bool IsExcluded(string? ownerName, string? primitiveName)
+	private static bool IsExcluded(SchematicObject owner, string? primitiveName)
 	{
 		IEnumerable<string>? patterns = CurrentConfig?.PrimitiveExcludedSchematicNamePatterns;
 		if (patterns == null)
 			return false;
+
+        if (!ExcludedOwners.TryGetValue(owner, out bool ownerExcluded))
+        {
+            ownerExcluded = false;
+            foreach (string? pattern in patterns)
+            {
+                if (!string.IsNullOrWhiteSpace(pattern) && GlobMatch(owner.Name ?? string.Empty, pattern.Trim()))
+                {
+                    ownerExcluded = true;
+                    break;
+                }
+            }
+            ExcludedOwners[owner] = ownerExcluded;
+        }
+        if (ownerExcluded)
+            return true;
+
+        string name = primitiveName ?? string.Empty;
+        if (!ExcludedPrimitiveNames.TryGetValue(owner, out Dictionary<string, bool>? primitiveCache))
+            ExcludedPrimitiveNames[owner] = primitiveCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        if (primitiveCache.TryGetValue(name, out bool primitiveExcluded))
+            return primitiveExcluded;
 
         foreach (string? pattern in patterns)
         {
             if (string.IsNullOrWhiteSpace(pattern))
                 continue;
             string value = pattern.Trim();
-            if (GlobMatch(ownerName ?? string.Empty, value) || GlobMatch(primitiveName ?? string.Empty, value))
+            if (GlobMatch(name, value))
+            {
+                primitiveCache[name] = true;
                 return true;
+            }
         }
+		primitiveCache[name] = false;
 		return false;
 	}
+
+    private static bool IsAssumedStatic(SchematicObject owner)
+    {
+        if (!AssumedStaticOwners.TryGetValue(owner, out bool assumedStatic))
+        {
+            assumedStatic = MatchesAny(owner.Name, CurrentConfig?.PrimitiveAssumeStaticSchematicNamePatterns);
+            AssumedStaticOwners[owner] = assumedStatic;
+        }
+        return assumedStatic;
+    }
 
 	private static bool MatchesAny(string? input, IEnumerable<string>? patterns)
 	{

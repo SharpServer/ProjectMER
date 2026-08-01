@@ -391,6 +391,11 @@ public class SchematicObject : MonoBehaviour
 
         GameObject gameObject = block.Create(this, parentTransform, isLeaf);
 
+        // Attach metadata before primitive eligibility is checked. ObjectPrefab-managed blocks and
+        // the precomputed leaf flag must be known before deciding to suppress native NetworkSpawn.
+        SchematicBlock schematicBlock = gameObject.AddComponent<SchematicBlock>();
+        schematicBlock.Init(this, block);
+
         // NetworkIdentity を持たない GO（確率外れ Pickup / 遅延スポーナー等）は Spawn しない
 		if (gameObject.TryGetComponent(out NetworkIdentity identity))
 		{
@@ -398,16 +403,13 @@ public class SchematicObject : MonoBehaviour
 				CullingManager.PrepareSchematicText(this, block, identity);
 
             bool deferPrimitiveSpawn = gameObject.TryGetComponent(out PrimitiveObjectToy primitive) &&
-                PrimitiveOptimizationManager.TryDefer(this, primitive);
+                PrimitiveOptimizationManager.TryDefer(this, primitive, isLeaf);
 
 			// Pickup.Create 等で既に Spawn 済み (netId != 0) のものを再 Spawn すると
 			// "already spawned" 警告が出るだけなのでスキップする
             if (!deferPrimitiveSpawn && identity.netId == 0)
 				NetworkServer.Spawn(gameObject);
 		}
-
-        SchematicBlock schematicBlock = gameObject.AddComponent<SchematicBlock>();
-        schematicBlock.Init(this, block);
         _blocks.Add(schematicBlock);
 
         // ObjectId が重複したデータでもマップロード全体を巻き込んで失敗させない

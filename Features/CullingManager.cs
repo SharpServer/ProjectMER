@@ -17,6 +17,12 @@ namespace ProjectMER.Features;
 /// </summary>
 public static class CullingManager
 {
+    // Vanilla clients instantiate and deserialize every synthetic primitive individually. Large
+    // bursts stall their main thread even when server bandwidth is available, so configuration may
+    // lower these limits but cannot raise them past the tested safety ceiling.
+    private const int SafePrimitiveObjectsPerPlayerTick = 2;
+    private const int SafePrimitiveObjectsGlobalTick = 32;
+
     private sealed class CullEntry
     {
         public NetworkIdentity? Identity;
@@ -409,12 +415,26 @@ public static class CullingManager
 				PrimitiveSchematicDistances[pair.Key.Trim()] = Math.Max(0.1f, pair.Value);
 		}
         _defaultHysteresis = Math.Max(0f, config.CullingHysteresis);
-        _updateInterval = Math.Max(0.05f, config.CullingUpdateInterval);
-        _sendInterval = Math.Max(0.02f, config.CullingSendInterval);
+        // Primitive groups are far more numerous than TextToy groups. A 20 Hz spatial rescan and
+        // 50 Hz transition drain needlessly burns the server main thread and feeds client-side
+        // object creation faster than vanilla clients can absorb it.
+        _updateInterval = Math.Max(_primitiveEnabled ? 0.1f : 0.05f, config.CullingUpdateInterval);
+        _sendInterval = Math.Max(_primitiveEnabled ? 0.05f : 0.02f, config.CullingSendInterval);
         _objectsPerUpdate = Math.Max(1, config.CullingObjectsPerUpdate);
-        _primitiveObjectsPerUpdate = Math.Max(1, config.PrimitiveObjectsPerUpdate);
+        _primitiveObjectsPerUpdate = Math.Min(
+            SafePrimitiveObjectsPerPlayerTick,
+            Math.Max(1, config.PrimitiveObjectsPerUpdate));
         _globalObjectsPerUpdate = Math.Max(_objectsPerUpdate, config.CullingGlobalObjectsPerUpdate);
-        _globalPrimitiveObjectsPerUpdate = Math.Max(_primitiveObjectsPerUpdate, config.PrimitiveGlobalObjectsPerUpdate);
+        _globalPrimitiveObjectsPerUpdate = Math.Min(
+            SafePrimitiveObjectsGlobalTick,
+            Math.Max(_primitiveObjectsPerUpdate, config.PrimitiveGlobalObjectsPerUpdate));
+        if (config.PrimitiveObjectsPerUpdate > SafePrimitiveObjectsPerPlayerTick ||
+            config.PrimitiveGlobalObjectsPerUpdate > SafePrimitiveObjectsGlobalTick)
+        {
+            Logger.Warn(
+                $"[CullingManager] Primitive send limits were capped at {_primitiveObjectsPerUpdate} per player / " +
+                $"{_globalPrimitiveObjectsPerUpdate} global per tick to protect vanilla client frame time.");
+        }
         _downgradeDelay = Math.Max(0f, config.CullingDowngradeDelay);
         _persistLowestLod = config.CullingPersistLowestLod;
         _defaultHardCullDistance = Math.Max(_defaultDistance, config.CullingHardCullDistance);

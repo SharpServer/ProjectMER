@@ -95,6 +95,8 @@ public class MapSchematic
 
 		foreach (Action spawnAction in EnumeratePreSchematicSpawnActions())
 			RunSpawnAction(spawnAction);
+		foreach (Action spawnAction in EnumerateEarlyInteractiveSpawnActions())
+			RunSpawnAction(spawnAction);
 
 		(List<KeyValuePair<string, SerializableSchematic>> prioritySchematics, List<KeyValuePair<string, SerializableSchematic>> remainingSchematics)
 			= SplitSchematicsByPriority(prioritySchematicNames);
@@ -137,6 +139,22 @@ public class MapSchematic
 				stopwatch.Restart();
 			}
 		}
+
+		// Teleports only depend on room transforms and on other teleport IDs. Spawn them before
+		// potentially huge schematics so gameplay does not wait for the visual map pipeline.
+		foreach (Action spawnAction in EnumerateEarlyInteractiveSpawnActions())
+		{
+			RunSpawnAction(spawnAction);
+
+			if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
+			{
+				yield return Timing.WaitForOneFrame;
+				stopwatch.Restart();
+			}
+		}
+
+		if (Teleports.Count > 0)
+			Logger.Debug($"[{Name}] Early interactive objects ready ({Teleports.Count} teleports).");
 
 		(List<KeyValuePair<string, SerializableSchematic>> prioritySchematics, List<KeyValuePair<string, SerializableSchematic>> remainingSchematics)
 			= SplitSchematicsByPriority(prioritySchematicNames);
@@ -350,13 +368,17 @@ public class MapSchematic
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
 	}
 
+	private IEnumerable<Action> EnumerateEarlyInteractiveSpawnActions()
+	{
+		foreach (KeyValuePair<string, SerializableTeleport> kVP in Teleports)
+			yield return () => SpawnObject(kVP.Key, kVP.Value);
+	}
+
 	private IEnumerable<Action> EnumeratePostSchematicSpawnActions()
 	{
 		foreach (KeyValuePair<string, SerializableScp079Camera> kVP in Scp079Cameras)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
 		foreach (KeyValuePair<string, SerializableShootingTarget> kVP in ShootingTargets)
-			yield return () => SpawnObject(kVP.Key, kVP.Value);
-		foreach (KeyValuePair<string, SerializableTeleport> kVP in Teleports)
 			yield return () => SpawnObject(kVP.Key, kVP.Value);
 		foreach (KeyValuePair<string, SerializableLocker> kVP in Lockers)
 			yield return () =>

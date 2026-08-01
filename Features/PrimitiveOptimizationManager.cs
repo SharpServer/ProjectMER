@@ -21,6 +21,8 @@ namespace ProjectMER.Features;
 /// </summary>
 public static class PrimitiveOptimizationManager
 {
+    private const int MaxAlwaysVisiblePrimitivesPerSchematic = 16;
+
     private sealed class OptimizedPrimitive
     {
         public SchematicObject Owner = null!;
@@ -131,6 +133,7 @@ public static class PrimitiveOptimizationManager
         public int Generation;
         public List<OptimizedPrimitive> Items = null!;
         public Task<ClusterPlan> Task = null!;
+        public int ApplyIndex;
     }
 
     private static readonly Dictionary<SchematicObject, List<PrimitiveObjectToy>> Pending = [];
@@ -144,6 +147,7 @@ public static class PrimitiveOptimizationManager
     private static SemaphoreSlim? _clusterWorkers;
     private static int _mainThreadId;
     private static bool _started;
+    private static bool _externalMeroOptimizerLoaded;
 
     private static Config? CurrentConfig => ProjectMER.Singleton?.Config;
 
@@ -153,7 +157,7 @@ public static class PrimitiveOptimizationManager
         {
             Config? config = CurrentConfig;
             return config?.EnablePrimitiveOptimization == true &&
-                config.EnableCulling && !ExternalMeroOptimizerLoaded();
+                config.EnableCulling && !_externalMeroOptimizerLoaded;
         }
     }
 
@@ -205,6 +209,9 @@ public static class PrimitiveOptimizationManager
             return;
 
         Stop();
+        // Plugin assemblies are all loaded before LabAPI enables ProjectMER. Cache this once instead
+        // of scanning the complete AppDomain for every primitive in a large schematic.
+        _externalMeroOptimizerLoaded = DetectExternalMeroOptimizer();
         _lifecycleCancellation = new CancellationTokenSource();
         int workerCount = Math.Max(1, CurrentConfig?.PrimitiveClusterWorkerCount ?? 1);
         _clusterWorkers = new SemaphoreSlim(workerCount, workerCount);
@@ -344,22 +351,29 @@ public static class PrimitiveOptimizationManager
     {
         while (_started)
         {
-            ApplyCompletedPlans();
-            ProcessFinalizationBudget();
-            ProcessNativeRestoreBudget();
+            ProcessOptimizationBudget();
             yield return Timing.WaitForOneFrame;
         }
 
-        ApplyCompletedPlans();
+        ProcessOptimizationBudget();
     }
 
-    private static void ProcessNativeRestoreBudget()
+    private static void ProcessOptimizationBudget()
+    {
+        float budgetMs = Math.Max(0.1f, CurrentConfig?.PrimitiveFinalizeFrameBudgetMs ?? 2f);
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        // Failed plans already have disabled native primitives, so restoration takes priority over
+        // applying or creating more optimized work.
+        ProcessNativeRestoreBudget(stopwatch, budgetMs);
+        ApplyCompletedPlans(stopwatch, budgetMs);
+        ProcessFinalizationBudget(stopwatch, budgetMs);
+    }
+
+    private static void ProcessNativeRestoreBudget(Stopwatch stopwatch, float budgetMs)
     {
         if (NativeRestoreQueue.Count == 0)
             return;
 
-        float budgetMs = Math.Max(0.1f, CurrentConfig?.PrimitiveFinalizeFrameBudgetMs ?? 2f);
-        Stopwatch stopwatch = Stopwatch.StartNew();
         while (NativeRestoreQueue.Count > 0 && stopwatch.Elapsed.TotalMilliseconds < budgetMs)
         {
             OptimizedPrimitive item = NativeRestoreQueue.Dequeue();
@@ -375,13 +389,11 @@ public static class PrimitiveOptimizationManager
         }
     }
 
-    private static void ProcessFinalizationBudget()
+    private static void ProcessFinalizationBudget(Stopwatch stopwatch, float budgetMs)
     {
         if (FinalizationQueue.Count == 0)
             return;
 
-        float budgetMs = Math.Max(0.1f, CurrentConfig?.PrimitiveFinalizeFrameBudgetMs ?? 2f);
-        Stopwatch stopwatch = Stopwatch.StartNew();
         while (FinalizationQueue.Count > 0 && stopwatch.Elapsed.TotalMilliseconds < budgetMs)
         {
             FinalizeWork work = FinalizationQueue.Peek();
@@ -529,6 +541,15 @@ public static class PrimitiveOptimizationManager
                 clustered.Add(input);
         }
 
+        // Sending every large primitive to every client defeats culling and can stall vanilla
+        // clients while they instantiate thousands of objects. Preserve the option for small
+        // structural schematics, but fold large sets back into spatial clusters.
+        if (alwaysVisible.Count > MaxAlwaysVisiblePrimitivesPerSchematic)
+        {
+            clustered.AddRange(alwaysVisible);
+            alwaysVisible.Clear();
+        }
+
         if (alwaysVisible.Count > 0)
             clusters.Add(CreateCluster(alwaysVisible, alwaysVisible: true));
 
@@ -594,17 +615,23 @@ public static class PrimitiveOptimizationManager
         };
     }
 
-    private static void ApplyCompletedPlans()
+    private static void ApplyCompletedPlans(Stopwatch stopwatch, float budgetMs)
     {
-        for (int i = ClusterJobs.Count - 1; i >= 0; i--)
+        // Process oldest jobs first. A LIFO walk lets a continuous stream of newly completed
+        // schematics starve an older partially-applied plan, leaving its native renderers disabled.
+        for (int i = 0;
+             i < ClusterJobs.Count && stopwatch.Elapsed.TotalMilliseconds < budgetMs;)
         {
             ClusterJob job = ClusterJobs[i];
             if (!job.Task.IsCompleted)
+            {
+                i++;
                 continue;
-            ClusterJobs.RemoveAt(i);
+            }
 
             if (job.Task.IsCanceled || job.Task.IsFaulted)
             {
+                ClusterJobs.RemoveAt(i);
                 foreach (OptimizedPrimitive item in job.Items)
                     NativeRestoreQueue.Enqueue(item);
                 if (job.Task.IsFaulted)
@@ -614,14 +641,16 @@ public static class PrimitiveOptimizationManager
 
             if (!IsOwnerGenerationAlive(job.Owner, job.Generation) || !Owners.TryGetValue(job.Owner, out OwnerState? state))
             {
+                ClusterJobs.RemoveAt(i);
                 foreach (OptimizedPrimitive item in job.Items)
                     item.Client.Invalidate();
                 continue;
             }
 
             ClusterPlan plan = job.Task.GetAwaiter().GetResult();
-            foreach (ClusterSpec cluster in plan.Clusters)
+            while (job.ApplyIndex < plan.Clusters.Length && stopwatch.Elapsed.TotalMilliseconds < budgetMs)
             {
+                ClusterSpec cluster = plan.Clusters[job.ApplyIndex++];
                 ClientPrimitive[] clientItems = cluster.Indices
                     .Where(index => index >= 0 && index < job.Items.Count)
                     .Select(index => job.Items[index].Client)
@@ -636,6 +665,11 @@ public static class PrimitiveOptimizationManager
                     cluster.Radius,
                     cluster.AlwaysVisible);
             }
+
+			if (job.ApplyIndex >= plan.Clusters.Length)
+				ClusterJobs.RemoveAt(i);
+			else
+				i++;
         }
     }
 
@@ -645,7 +679,8 @@ public static class PrimitiveOptimizationManager
 			!primitive.PrimitiveFlags.HasFlag(PrimitiveFlags.Visible) || primitive._renderer == null ||
 			!primitive._renderer.enabled)
 			return false;
-		if (!primitive.IsStatic && !MatchesAny(owner.Name, CurrentConfig?.PrimitiveAssumeStaticSchematicNamePatterns))
+		bool assumedStatic = MatchesAny(owner.Name, CurrentConfig?.PrimitiveAssumeStaticSchematicNamePatterns);
+		if (!primitive.IsStatic && !assumedStatic)
 			return false;
 		// A schematic parented under a player or another runtime object is explicitly dynamic even if
 		// its exported blocks were marked static (for example SCP-513 manifestations).
@@ -664,24 +699,31 @@ public static class PrimitiveOptimizationManager
         if (primitive.TryGetComponent(out SchematicBlock schematicBlock) && schematicBlock != null && schematicBlock.HasObjectPrefabKey)
             return false;
 
-        for (Transform? current = primitive.transform; current != null; current = current.parent)
+        // The explicit assume-static allowlist is the operator's promise that the complete
+        // schematic is immutable. Avoid the otherwise expensive ancestor component scan for every
+        // primitive in very large schematics; that scan can reduce staggered loading to one block
+        // per frame and postpone gameplay objects for minutes.
+        if (!assumedStatic)
         {
-            if (current.TryGetComponent<Animator>(out _) || current.TryGetComponent<Rigidbody>(out _))
-                return false;
-
-            foreach (Component component in current.GetComponents<Component>())
+            for (Transform? current = primitive.transform; current != null; current = current.parent)
             {
-                if (component == null || component is Transform || component is Renderer || component is Collider ||
-                    component is MeshFilter || component is NetworkIdentity || component is AdminToyBase ||
-                    component is SchematicObject || component is SchematicBlock)
-                    continue;
-                // Anything else (including non-MonoBehaviour runtime components such as audio,
-                // particle or network transform components) can alter state after this snapshot.
-                return false;
-            }
+                if (current.TryGetComponent<Animator>(out _) || current.TryGetComponent<Rigidbody>(out _))
+                    return false;
 
-            if (current == owner.transform)
-                break;
+                foreach (Component component in current.GetComponents<Component>())
+                {
+                    if (component == null || component is Transform || component is Renderer || component is Collider ||
+                        component is MeshFilter || component is NetworkIdentity || component is AdminToyBase ||
+                        component is SchematicObject || component is SchematicBlock)
+                        continue;
+                    // Anything else (including non-MonoBehaviour runtime components such as audio,
+                    // particle or network transform components) can alter state after this snapshot.
+                    return false;
+                }
+
+                if (current == owner.transform)
+                    break;
+            }
         }
 
 		return !IsExcluded(owner.Name, primitive.name);
@@ -785,7 +827,7 @@ public static class PrimitiveOptimizationManager
 
     private static bool IsMainThread() => _mainThreadId != 0 && Thread.CurrentThread.ManagedThreadId == _mainThreadId;
 
-    private static bool ExternalMeroOptimizerLoaded()
+    private static bool DetectExternalMeroOptimizer()
     {
         // MEROptimizer owns the same native PrimitiveObjectToy spawn path. Do not activate both
         // optimizers; the integrated option is intentionally opt-in and defaults off in Config.

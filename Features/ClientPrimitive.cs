@@ -14,14 +14,25 @@ namespace ProjectMER.Features;
 /// </summary>
 public sealed class ClientPrimitive
 {
+    // Mirror's reliable channel accepts very large fragmented messages, but a vanilla client can
+    // still stall while deserializing one. Oversized primitives remain native instead.
+    private const int MaximumSafeSpawnMessageBytes = 24 * 1024;
     private readonly SpawnMessage _spawnMessage;
     private readonly ObjectDestroyMessage _destroyMessage;
     private readonly Dictionary<int, NetworkConnectionToClient> _viewers = [];
 
-    private ClientPrimitive(SpawnMessage spawnMessage, SchematicObject? owner, PrimitiveObjectToy primitive)
+    private ClientPrimitive(
+        SpawnMessage spawnMessage,
+        int spawnMessageSize,
+        ObjectDestroyMessage destroyMessage,
+        int destroyMessageSize,
+        SchematicObject? owner,
+        PrimitiveObjectToy primitive)
     {
         _spawnMessage = spawnMessage;
-        _destroyMessage = new ObjectDestroyMessage { netId = spawnMessage.netId };
+        _destroyMessage = destroyMessage;
+        SpawnMessageSize = spawnMessageSize;
+        DestroyMessageSize = destroyMessageSize;
         Owner = owner;
         NativePrimitive = primitive;
         LocalPosition = spawnMessage.position;
@@ -31,6 +42,12 @@ public sealed class ClientPrimitive
 
     /// <summary>Gets the synthetic Mirror net ID used by this client-only object.</summary>
     public uint NetId => _spawnMessage.netId;
+
+    /// <summary>Gets the exact packed byte size of the spawn message sent to clients.</summary>
+    public int SpawnMessageSize { get; }
+
+    /// <summary>Gets the exact packed byte size of the destroy message sent to clients.</summary>
+    public int DestroyMessageSize { get; }
 
     /// <summary>Gets the schematic which owns this primitive, when created by the optimizer.</summary>
     public SchematicObject? Owner { get; }
@@ -63,6 +80,13 @@ public sealed class ClientPrimitive
 
     /// <summary>Gets the connection IDs which currently have this object displayed.</summary>
     public IReadOnlyCollection<int> Viewers => _viewers.Keys;
+
+    /// <summary>Gets whether this object is currently tracked as visible to the given client.</summary>
+    public bool IsVisibleTo(NetworkConnectionToClient? connection)
+    {
+        return connection != null && _viewers.TryGetValue(connection.connectionId, out NetworkConnectionToClient? tracked) &&
+            ReferenceEquals(tracked, connection);
+    }
 
     /// <summary>
     /// Creates a client primitive entirely on the Unity/main thread. The payload is generated through
@@ -125,7 +149,24 @@ public sealed class ClientPrimitive
                 payload = new ArraySegment<byte>(bytes),
             };
 
-            clientPrimitive = new ClientPrimitive(spawnMessage, owner, primitive)
+            ObjectDestroyMessage destroyMessage = new() { netId = netId };
+            using NetworkWriterPooled packedWriter = NetworkWriterPool.Get();
+            NetworkMessages.Pack(spawnMessage, packedWriter);
+            int spawnMessageSize = packedWriter.Position;
+            if (spawnMessageSize > Math.Min(NetworkMessages.MaxMessageSize(0), MaximumSafeSpawnMessageBytes))
+                return false;
+
+            packedWriter.Position = 0;
+            NetworkMessages.Pack(destroyMessage, packedWriter);
+            int destroyMessageSize = packedWriter.Position;
+
+            clientPrimitive = new ClientPrimitive(
+                spawnMessage,
+                spawnMessageSize,
+                destroyMessage,
+                destroyMessageSize,
+                owner,
+                primitive)
             {
                 ParentNetId = parentIdentity.netId,
                 IsCollidable = primitive.PrimitiveFlags.HasFlag(PrimitiveFlags.Collidable),
@@ -176,15 +217,22 @@ public sealed class ClientPrimitive
     public bool Hide(NetworkConnectionToClient? connection)
     {
         if (connection == null || !_viewers.TryGetValue(connection.connectionId, out NetworkConnectionToClient? tracked) ||
-            !ReferenceEquals(tracked, connection) || !_viewers.Remove(connection.connectionId))
+            !ReferenceEquals(tracked, connection))
             return false;
 
-        if (IsDestroyed || !IsReadyClient(connection))
+        if (IsDestroyed)
+        {
+            _viewers.Remove(connection.connectionId);
+            return false;
+        }
+
+        if (!IsReadyClient(connection))
             return false;
 
         try
         {
             connection.Send(_destroyMessage);
+            _viewers.Remove(connection.connectionId);
             return true;
         }
         catch
@@ -195,6 +243,17 @@ public sealed class ClientPrimitive
 
     /// <summary>Alias used by culling integrations which call the operation a destroy.</summary>
     public bool Destroy(NetworkConnectionToClient? connection) => Hide(connection);
+
+    /// <summary>Forgets a connection which is permanently gone or whose client world was reset.</summary>
+    internal void ForgetViewer(NetworkConnectionToClient? connection)
+    {
+        if (connection != null &&
+            _viewers.TryGetValue(connection.connectionId, out NetworkConnectionToClient? tracked) &&
+            ReferenceEquals(tracked, connection))
+        {
+            _viewers.Remove(connection.connectionId);
+        }
+    }
 
     /// <summary>Invalidates this object after its owner/manager has been unregistered.</summary>
     internal void Invalidate()

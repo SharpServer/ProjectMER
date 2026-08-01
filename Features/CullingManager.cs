@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using CentralAuth;
 using LabApi.Features.Wrappers;
+using LiteNetLib;
 using MEC;
 using Mirror;
+using Mirror.LiteNetLib4Mirror;
 using ProjectMER.Features.Objects;
 using ProjectMER.Features.Serializable.Schematics;
 using UnityEngine;
@@ -17,11 +19,22 @@ namespace ProjectMER.Features;
 /// </summary>
 public static class CullingManager
 {
-    // Vanilla clients instantiate and deserialize every synthetic primitive individually. Large
-    // bursts stall their main thread even when server bandwidth is available, so configuration may
-    // lower these limits but cannot raise them past the tested safety ceiling.
-    private const int SafePrimitiveObjectsPerPlayerTick = 2;
-    private const int SafePrimitiveObjectsGlobalTick = 32;
+    // Spawn/Destroy must remain reliable and ordered for vanilla clients. Throughput is therefore
+    // controlled with byte/object token buckets and AIMD feedback instead of a fixed tiny cap.
+    private const float MinimumSchedulerInterval = 0.02f;
+    private const float InitialPrimitiveRate = 120f;
+    private const float MinimumPrimitiveRate = 20f;
+    private const float MaximumPrimitiveRate = 320f;
+    private const float InitialGlobalPrimitiveRate = 800f;
+    private const float MaximumGlobalPrimitiveRate = 1600f;
+    private const float PressureSampleInterval = 0.25f;
+    private const int MirrorBatchSoftLimitBytes = 16 * 1024;
+    private const int MirrorBatchHardLimitBytes = 48 * 1024;
+    private const int PrimitiveByteBurst = 64 * 1024;
+    private const int GlobalPrimitiveByteBurst = 256 * 1024;
+    private const int ReliableQueueSoftLimit = 16;
+    private const int ReliableQueueHardLimit = 48;
+    private const int TransitionAttemptMultiplier = 4;
 
     private sealed class CullEntry
     {
@@ -80,7 +93,23 @@ public static class CullingManager
                 return Array.Empty<CullEntry>();
 
             entries.RemoveAll(entry => !entry.IsAlive);
-            entries.Sort((left, right) => left.Order.CompareTo(right.Order));
+            entries.Sort((left, right) =>
+            {
+                ClientPrimitive? leftPrimitive = left.ClientPrimitive;
+                ClientPrimitive? rightPrimitive = right.ClientPrimitive;
+                if (leftPrimitive != null && rightPrimitive != null)
+                {
+                    if (leftPrimitive.IsCollidable != rightPrimitive.IsCollidable)
+                        return leftPrimitive.IsCollidable ? -1 : 1;
+                    int collisionPriority = rightPrimitive.CollisionPriority.CompareTo(leftPrimitive.CollisionPriority);
+                    if (collisionPriority != 0)
+                        return collisionPriority;
+                    int sizePriority = rightPrimitive.SizePriority.CompareTo(leftPrimitive.SizePriority);
+                    if (sizePriority != 0)
+                        return sizePriority;
+                }
+                return left.Order.CompareTo(right.Order);
+            });
             return entries;
         }
 
@@ -154,6 +183,51 @@ public static class CullingManager
         public readonly HashSet<CullGroup> ScanGroups = [];
         public readonly List<TransitionWork> Transitions = [];
         public readonly List<CullGroup> StaleGroups = [];
+        public int IdentityTransitionCursor;
+        public int PrimitiveTransitionCursor;
+        public float PrimitiveTokens;
+        public float PrimitiveByteTokens;
+        public float PrimitiveRate = InitialPrimitiveRate;
+        public float LastTokenUpdate;
+        public float NextPressureSample;
+        public float BaselineRttMs = float.PositiveInfinity;
+        public bool PausePrimitiveSends;
+        public bool NeedsResync;
+    }
+
+    private readonly struct SendUsage
+    {
+        public readonly int Operations;
+        public readonly int CostUnits;
+        public readonly int Bytes;
+
+        public SendUsage(int operations, int costUnits, int bytes)
+        {
+            Operations = operations;
+            CostUnits = costUnits;
+            Bytes = bytes;
+        }
+    }
+
+    private readonly struct ConnectionPressure
+    {
+        public readonly float RttMs;
+        public readonly int ReliableQueue;
+        public readonly int PendingBatchBytes;
+
+        public ConnectionPressure(float rttMs, int reliableQueue, int pendingBatchBytes)
+        {
+            RttMs = rttMs;
+            ReliableQueue = reliableQueue;
+            PendingBatchBytes = pendingBatchBytes;
+        }
+    }
+
+    private enum EntryApplyResult
+    {
+        Sent,
+        Complete,
+        RetryLater,
     }
 
     private sealed class OwnerIndexState
@@ -237,9 +311,15 @@ public static class CullingManager
     private static float _defaultHardCullDistance;
     private static float _spatialCellSize;
     private static float _maxSpatialDistance;
+    private static bool _spatialDistanceDirty;
     private static float _nextErrorLogTime;
     private static int _playerCursor;
     private static int _nextPrimitiveGroupId;
+    private static float _globalPrimitiveTokens;
+    private static float _globalPrimitiveRate;
+    private static float _globalPrimitiveByteTokens;
+    private static float _lastGlobalTokenUpdate;
+    private static float _nextGlobalPressureSample;
 
     public static void PrepareStandalone(NetworkIdentity identity)
     {
@@ -415,30 +495,33 @@ public static class CullingManager
 				PrimitiveSchematicDistances[pair.Key.Trim()] = Math.Max(0.1f, pair.Value);
 		}
         _defaultHysteresis = Math.Max(0f, config.CullingHysteresis);
-        // Primitive groups are far more numerous than TextToy groups. A 20 Hz spatial rescan and
-        // 50 Hz transition drain needlessly burns the server main thread and feeds client-side
-        // object creation faster than vanilla clients can absorb it.
+        // Distance scans stay deliberately coarse, while the sender runs at network-frame
+        // granularity. Its token buckets preserve small bursts and adapt the sustained rate.
         _updateInterval = Math.Max(_primitiveEnabled ? 0.1f : 0.05f, config.CullingUpdateInterval);
-        _sendInterval = Math.Max(_primitiveEnabled ? 0.05f : 0.02f, config.CullingSendInterval);
+        _sendInterval = Math.Max(MinimumSchedulerInterval, config.CullingSendInterval);
         _objectsPerUpdate = Math.Max(1, config.CullingObjectsPerUpdate);
-        _primitiveObjectsPerUpdate = Math.Min(
-            SafePrimitiveObjectsPerPlayerTick,
-            Math.Max(1, config.PrimitiveObjectsPerUpdate));
+        _primitiveObjectsPerUpdate = Math.Max(1, config.PrimitiveObjectsPerUpdate);
         _globalObjectsPerUpdate = Math.Max(_objectsPerUpdate, config.CullingGlobalObjectsPerUpdate);
-        _globalPrimitiveObjectsPerUpdate = Math.Min(
-            SafePrimitiveObjectsGlobalTick,
-            Math.Max(_primitiveObjectsPerUpdate, config.PrimitiveGlobalObjectsPerUpdate));
-        if (config.PrimitiveObjectsPerUpdate > SafePrimitiveObjectsPerPlayerTick ||
-            config.PrimitiveGlobalObjectsPerUpdate > SafePrimitiveObjectsGlobalTick)
-        {
-            Logger.Warn(
-                $"[CullingManager] Primitive send limits were capped at {_primitiveObjectsPerUpdate} per player / " +
-                $"{_globalPrimitiveObjectsPerUpdate} global per tick to protect vanilla client frame time.");
-        }
+        _globalPrimitiveObjectsPerUpdate = Math.Max(
+            _primitiveObjectsPerUpdate,
+            config.PrimitiveGlobalObjectsPerUpdate);
+        _globalPrimitiveTokens = Math.Min(_globalPrimitiveObjectsPerUpdate, InitialGlobalPrimitiveRate * _sendInterval);
+        _globalPrimitiveRate = Math.Min(GetMaximumGlobalRate(), InitialGlobalPrimitiveRate);
+        _globalPrimitiveByteTokens = GlobalPrimitiveByteBurst;
+        _lastGlobalTokenUpdate = Time.realtimeSinceStartup;
+        _nextGlobalPressureSample = _lastGlobalTokenUpdate + PressureSampleInterval;
         _downgradeDelay = Math.Max(0f, config.CullingDowngradeDelay);
         _persistLowestLod = config.CullingPersistLowestLod;
         _defaultHardCullDistance = Math.Max(_defaultDistance, config.CullingHardCullDistance);
         _spatialCellSize = Math.Max(10f, config.CullingSpatialCellSize);
+        if (_primitiveEnabled)
+        {
+            Logger.Info(
+                $"[CullingManager] Adaptive primitive sender enabled: {InitialPrimitiveRate:0}-" +
+                $"{GetMaximumPlayerRate():0} work/s per client, {_globalPrimitiveRate:0}-" +
+                $"{GetMaximumGlobalRate():0} global work/s, {_primitiveObjectsPerUpdate}/" +
+                $"{_globalPrimitiveObjectsPerUpdate} emergency tick ceilings.");
+        }
         if (_running)
             _cullingCoroutine = Timing.RunCoroutine(CullingLoop());
     }
@@ -562,6 +645,7 @@ public static class CullingManager
 
         foreach (PlayerState playerState in PlayerStates.Values)
             playerState.Views.Remove(group);
+        _spatialDistanceDirty = true;
     }
 
     private static IEnumerator<float> CullingLoop()
@@ -575,6 +659,8 @@ public static class CullingManager
             {
                 nextScan = now + _updateInterval;
                 RefreshMovedGroups();
+                if (_spatialDistanceDirty)
+                    RecalculateMaximumSpatialDistance();
             }
 
             UpdateAllPlayers(scan);
@@ -599,8 +685,21 @@ public static class CullingManager
                 DisconnectedConnections.Add(connection);
         foreach (NetworkConnectionToClient connection in DisconnectedConnections)
         {
+            if (NetworkServer.connections.TryGetValue(connection.connectionId, out NetworkConnectionToClient? current) &&
+                ReferenceEquals(current, connection))
+            {
+                // Authentication/round transitions can temporarily leave a live connection non-ready.
+                // Preserve the desired state, then destroy/re-show it through the paced sender once
+                // ReadyClient returns. This works whether the client kept or reset its spawned world.
+                if (PlayerStates.TryGetValue(connection, out PlayerState? suspendedState))
+                    suspendedState.NeedsResync = true;
+                continue;
+            }
             foreach (ClientPrimitive primitive in ClientPrimitiveGroups.Keys)
+            {
                 primitive.Hide(connection);
+                primitive.ForgetViewer(connection);
+            }
             PlayerStates.Remove(connection);
         }
         DisconnectedConnections.Clear();
@@ -608,15 +707,34 @@ public static class CullingManager
         if (ReadyPlayers.Count == 0)
             return;
 
+        float now = Time.realtimeSinceStartup;
         int identityGlobalBudget = _globalObjectsPerUpdate;
-        int primitiveGlobalBudget = _globalPrimitiveObjectsPerUpdate;
+        int primitiveGlobalBudget = GetGlobalPrimitiveBudget(now);
+        int primitiveGlobalByteBudget = Mathf.FloorToInt(_globalPrimitiveByteTokens);
+        int primitiveGlobalUsed = 0;
+        int primitiveGlobalBytesUsed = 0;
         int start = _playerCursor % ReadyPlayers.Count;
+        int lastServed = -1;
         for (int offset = 0; offset < ReadyPlayers.Count; offset++)
         {
-            (Player player, NetworkConnectionToClient connection) = ReadyPlayers[(start + offset) % ReadyPlayers.Count];
+            int playerIndex = (start + offset) % ReadyPlayers.Count;
+            (Player player, NetworkConnectionToClient connection) = ReadyPlayers[playerIndex];
             try
             {
-                UpdatePlayer(player, connection, scan, ref identityGlobalBudget, ref primitiveGlobalBudget);
+                int bytesBefore = primitiveGlobalByteBudget;
+                int used = UpdatePlayer(
+                    player,
+                    connection,
+                    scan,
+                    ref identityGlobalBudget,
+                    ref primitiveGlobalBudget,
+                    ref primitiveGlobalByteBudget,
+                    now,
+                    out bool served);
+                primitiveGlobalUsed += used;
+                primitiveGlobalBytesUsed += bytesBefore - primitiveGlobalByteBudget;
+                if (served)
+                    lastServed = playerIndex;
             }
             catch (Exception exception)
             {
@@ -626,7 +744,9 @@ public static class CullingManager
                 Logger.Error($"[CullingManager] Update failed (further errors suppressed for 30s): {exception}");
             }
         }
-        _playerCursor = (start + 1) % ReadyPlayers.Count;
+        _globalPrimitiveTokens = Math.Max(0f, _globalPrimitiveTokens - primitiveGlobalUsed);
+        _globalPrimitiveByteTokens = Math.Max(0f, _globalPrimitiveByteTokens - primitiveGlobalBytesUsed);
+        _playerCursor = ((lastServed >= 0 ? lastServed : start) + 1) % ReadyPlayers.Count;
     }
 
 	private static void RefreshMovedGroups()
@@ -664,15 +784,42 @@ public static class CullingManager
         OwnerScratch.Clear();
     }
 
-    private static void UpdatePlayer(
+    private static void RecalculateMaximumSpatialDistance()
+    {
+        float maximum = 0f;
+        foreach (CullGroup group in Groups.Values)
+        {
+            if (!group.AlwaysVisible)
+                maximum = Math.Max(maximum, group.CullingDistance + group.Hysteresis);
+        }
+        _maxSpatialDistance = maximum;
+        _spatialDistanceDirty = false;
+    }
+
+    private static int UpdatePlayer(
         Player player,
         NetworkConnectionToClient connection,
         bool scan,
         ref int identityGlobalBudget,
-        ref int primitiveGlobalBudget)
+        ref int primitiveGlobalBudget,
+        ref int primitiveGlobalByteBudget,
+        float now,
+        out bool served)
     {
+        served = false;
         if (!PlayerStates.TryGetValue(connection, out PlayerState? playerState))
-            PlayerStates[connection] = playerState = new PlayerState();
+        {
+            PlayerStates[connection] = playerState = new PlayerState
+            {
+                PrimitiveTokens = Math.Min(_primitiveObjectsPerUpdate, InitialPrimitiveRate * _sendInterval),
+                PrimitiveByteTokens = PrimitiveByteBurst,
+                LastTokenUpdate = now,
+                NextPressureSample = now,
+            };
+        }
+
+        if (playerState.NeedsResync)
+            PrepareConnectionResync(playerState, connection);
 
         if (scan)
             ScanPlayer(player, playerState);
@@ -684,29 +831,266 @@ public static class CullingManager
         playerState.Transitions.Sort(CompareTransitions);
 
         int identityBudget = Math.Min(_objectsPerUpdate, identityGlobalBudget);
-        int primitiveBudget = Math.Min(_primitiveObjectsPerUpdate, primitiveGlobalBudget);
-        foreach (TransitionWork transition in playerState.Transitions)
-        {
-            if (transition.Group.IsPrimitiveGroup)
-            {
-                if (primitiveBudget <= 0)
-                    continue;
-                int used = ProcessTransition(transition.Group, transition.State, connection, primitiveBudget);
-                primitiveBudget -= used;
-                primitiveGlobalBudget -= used;
-            }
-            else
-            {
-                if (identityBudget <= 0)
-                    continue;
-                int used = ProcessTransition(transition.Group, transition.State, connection, identityBudget);
-                identityBudget -= used;
-                identityGlobalBudget -= used;
-            }
-            if (identityBudget <= 0 && primitiveBudget <= 0)
-                break;
-        }
+        SendUsage identityUsage = ProcessTransitionLane(
+            playerState.Transitions,
+            connection,
+            primitiveLane: false,
+            identityBudget,
+            int.MaxValue,
+            ref playerState.IdentityTransitionCursor);
+        identityGlobalBudget -= identityUsage.CostUnits;
+        served = identityUsage.Operations > 0;
+
+        UpdatePrimitiveController(playerState, connection, now);
+        if (primitiveGlobalBudget <= 0 || playerState.PausePrimitiveSends)
+            return 0;
+
+        int primitiveBudget = Math.Min(
+            Math.Min(_primitiveObjectsPerUpdate, primitiveGlobalBudget),
+            Mathf.FloorToInt(playerState.PrimitiveTokens));
+        int pendingBatchBytes = GetPendingBatchBytes(connection);
+        int primitiveByteBudget = Math.Min(
+            Math.Min(Mathf.FloorToInt(playerState.PrimitiveByteTokens), primitiveGlobalByteBudget),
+            Math.Max(0, MirrorBatchHardLimitBytes - pendingBatchBytes));
+        if (primitiveBudget <= 0 || primitiveByteBudget <= 0)
+            return 0;
+
+        SendUsage primitiveUsage = ProcessTransitionLane(
+            playerState.Transitions,
+            connection,
+            primitiveLane: true,
+            primitiveBudget,
+            primitiveByteBudget,
+            ref playerState.PrimitiveTransitionCursor);
+        primitiveGlobalBudget -= primitiveUsage.CostUnits;
+        primitiveGlobalByteBudget -= primitiveUsage.Bytes;
+        playerState.PrimitiveTokens = Math.Max(0f, playerState.PrimitiveTokens - primitiveUsage.CostUnits);
+        playerState.PrimitiveByteTokens = Math.Max(0f, playerState.PrimitiveByteTokens - primitiveUsage.Bytes);
+        served |= primitiveUsage.Operations > 0;
+        return primitiveUsage.CostUnits;
     }
+
+    private static void PrepareConnectionResync(PlayerState playerState, NetworkConnectionToClient connection)
+    {
+        foreach (KeyValuePair<CullGroup, ViewState> pair in playerState.Views)
+        {
+            CullGroup group = pair.Key;
+            ViewState state = pair.Value;
+            int desiredLod = state.IsTransitioning ? state.RequestedLod : state.CurrentLod;
+            List<CullEntry> visible = [];
+            foreach (List<CullEntry> entries in group.Lods.Values)
+            {
+                foreach (CullEntry entry in entries)
+                {
+                    bool isVisible = entry.ClientPrimitive != null
+                        ? entry.ClientPrimitive.IsVisibleTo(connection)
+                        : entry.Identity != null && entry.Identity.isServer &&
+                            entry.Identity.observers.ContainsKey(connection.connectionId);
+                    if (isVisible && !visible.Contains(entry))
+                        visible.Add(entry);
+                }
+            }
+
+            state.CurrentLod = visible.Count > 0 ? 0 : -1;
+            state.TargetLod = -1;
+            state.RequestedLod = desiredLod;
+            state.Showing = Array.Empty<CullEntry>();
+            state.Hiding = visible;
+            state.ShowIndex = 0;
+            state.HideIndex = 0;
+            state.IsTransitioning = visible.Count > 0 || desiredLod >= 0;
+            state.PendingDowngradeLod = NoPendingDowngrade;
+        }
+        playerState.NeedsResync = false;
+    }
+
+    private static SendUsage ProcessTransitionLane(
+        List<TransitionWork> transitions,
+        NetworkConnectionToClient connection,
+        bool primitiveLane,
+        int operationBudget,
+        int byteBudget,
+        ref int cursor)
+    {
+        if (operationBudget <= 0 || byteBudget <= 0 || transitions.Count == 0)
+            return default;
+
+        int index = cursor % transitions.Count;
+        int attempts = 0;
+        int maxAttempts = Math.Max(
+            transitions.Count,
+            operationBudget * TransitionAttemptMultiplier + transitions.Count);
+        int operations = 0;
+        int costUnits = 0;
+        int bytes = 0;
+
+        while (costUnits < operationBudget && bytes < byteBudget && attempts < maxAttempts)
+        {
+            TransitionWork transition = transitions[index];
+            index = (index + 1) % transitions.Count;
+            attempts++;
+            if (transition.Group.IsPrimitiveGroup != primitiveLane || !transition.State.IsTransitioning)
+                continue;
+
+            SendUsage usage = ProcessTransition(
+                transition.Group,
+                transition.State,
+                connection,
+                operationBudget - costUnits,
+                byteBudget - bytes);
+            operations += usage.Operations;
+            costUnits += usage.CostUnits;
+            bytes += usage.Bytes;
+        }
+
+        // Advance to the item after the last one examined, not merely one player/group per tick.
+        // This bounds wait time even when the global budget is exhausted by a large active set.
+        cursor = index;
+        return new SendUsage(operations, costUnits, bytes);
+    }
+
+    private static void UpdatePrimitiveController(
+        PlayerState state,
+        NetworkConnectionToClient connection,
+        float now)
+    {
+        float elapsed = Mathf.Clamp(now - state.LastTokenUpdate, 0f, 0.5f);
+        state.LastTokenUpdate = now;
+
+        if (now >= state.NextPressureSample)
+        {
+            state.NextPressureSample = now + PressureSampleInterval;
+            ConnectionPressure pressure = GetConnectionPressure(connection);
+            if (pressure.RttMs > 0f)
+            {
+                if (float.IsPositiveInfinity(state.BaselineRttMs) || pressure.RttMs < state.BaselineRttMs)
+                    state.BaselineRttMs = pressure.RttMs;
+                else if (pressure.ReliableQueue == 0 && pressure.PendingBatchBytes < MirrorBatchSoftLimitBytes)
+                    state.BaselineRttMs = Mathf.Lerp(state.BaselineRttMs, pressure.RttMs, 0.05f);
+            }
+
+            float baseline = float.IsPositiveInfinity(state.BaselineRttMs)
+                ? Math.Max(1f, pressure.RttMs)
+                : state.BaselineRttMs;
+            bool hardPressure = pressure.PendingBatchBytes >= MirrorBatchHardLimitBytes ||
+                pressure.ReliableQueue >= ReliableQueueHardLimit ||
+                pressure.RttMs > Math.Max(baseline * 3f, baseline + 180f);
+            bool softPressure = pressure.PendingBatchBytes >= MirrorBatchSoftLimitBytes ||
+                pressure.ReliableQueue >= ReliableQueueSoftLimit ||
+                pressure.RttMs > Math.Max(baseline * 1.75f, baseline + 75f) ||
+                Time.unscaledDeltaTime > 0.025f;
+
+            float maximumRate = GetMaximumPlayerRate();
+            if (hardPressure)
+                state.PrimitiveRate = Math.Max(MinimumPrimitiveRate, state.PrimitiveRate * 0.5f);
+            else if (softPressure)
+                state.PrimitiveRate = Math.Max(MinimumPrimitiveRate, state.PrimitiveRate * 0.8f);
+            else
+                state.PrimitiveRate = Math.Min(
+                    maximumRate,
+                    state.PrimitiveRate + Math.Max(5f, state.PrimitiveRate * 0.04f));
+
+            state.PausePrimitiveSends = hardPressure;
+        }
+
+        state.PrimitiveRate = Math.Min(state.PrimitiveRate, GetMaximumPlayerRate());
+        if (state.PausePrimitiveSends)
+        {
+            state.PrimitiveTokens = Math.Min(
+                state.PrimitiveTokens,
+                Math.Max(2f, state.PrimitiveRate * _sendInterval));
+            state.PrimitiveByteTokens = Math.Min(state.PrimitiveByteTokens, 8 * 1024f);
+            return;
+        }
+        state.PrimitiveTokens = Math.Min(
+            _primitiveObjectsPerUpdate,
+            state.PrimitiveTokens + state.PrimitiveRate * elapsed);
+        float byteRate = Mathf.Clamp(state.PrimitiveRate * 512f, 32 * 1024f, 512 * 1024f);
+        state.PrimitiveByteTokens = Math.Min(
+            PrimitiveByteBurst,
+            state.PrimitiveByteTokens + byteRate * elapsed);
+    }
+
+    private static ConnectionPressure GetConnectionPressure(NetworkConnectionToClient connection)
+    {
+        float rttMs = connection.rtt > 0d ? (float)(connection.rtt * 1000d) : 0f;
+        int reliableQueue = 0;
+        try
+        {
+            if (LiteNetLib4MirrorServer.Peers != null &&
+                LiteNetLib4MirrorServer.Peers.TryGetValue(connection.connectionId, out NetPeer? peer) &&
+                peer != null)
+            {
+                if (peer.Ping > 0)
+                    rttMs = Math.Max(rttMs, peer.Ping);
+                reliableQueue = peer.GetPacketsCountInReliableQueue(0, ordered: true);
+                const int reliableOrderedChannelIndex = 2;
+                if (peer._channels.Length > reliableOrderedChannelIndex &&
+                    peer._channels[reliableOrderedChannelIndex] is ReliableChannel reliableChannel)
+                {
+                    lock (reliableChannel._pendingPackets)
+                    {
+                        foreach (ReliableChannel.PendingPacket packet in reliableChannel._pendingPackets)
+                            if (!packet.IsEmpty)
+                                reliableQueue++;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Mirror RTT and batch bytes remain transport-independent fallbacks.
+        }
+
+        return new ConnectionPressure(rttMs, reliableQueue, GetPendingBatchBytes(connection));
+    }
+
+    private static int GetPendingBatchBytes(NetworkConnectionToClient connection)
+    {
+        if (!connection.batches.TryGetValue(Channels.Reliable, out Batcher? batcher))
+            return 0;
+
+        long total = batcher.batch?.Position ?? 0;
+        foreach (NetworkWriterPooled writer in batcher.batches)
+            total += writer?.Position ?? 0;
+        return total >= int.MaxValue ? int.MaxValue : (int)total;
+    }
+
+    private static int GetGlobalPrimitiveBudget(float now)
+    {
+        float elapsed = Mathf.Clamp(now - _lastGlobalTokenUpdate, 0f, 0.5f);
+        _lastGlobalTokenUpdate = now;
+        if (now >= _nextGlobalPressureSample)
+        {
+            _nextGlobalPressureSample = now + PressureSampleInterval;
+            if (Time.unscaledDeltaTime > 0.03f)
+                _globalPrimitiveRate = Math.Max(InitialPrimitiveRate, _globalPrimitiveRate * 0.5f);
+            else if (Time.unscaledDeltaTime > 0.022f)
+                _globalPrimitiveRate = Math.Max(InitialPrimitiveRate, _globalPrimitiveRate * 0.8f);
+            else
+                _globalPrimitiveRate = Math.Min(
+                    GetMaximumGlobalRate(),
+                    _globalPrimitiveRate + Math.Max(20f, _globalPrimitiveRate * 0.04f));
+        }
+
+        _globalPrimitiveRate = Math.Min(_globalPrimitiveRate, GetMaximumGlobalRate());
+        _globalPrimitiveTokens = Math.Min(
+            _globalPrimitiveObjectsPerUpdate,
+            _globalPrimitiveTokens + _globalPrimitiveRate * elapsed);
+        float globalByteRate = Mathf.Clamp(_globalPrimitiveRate * 512f, 256 * 1024f, 2 * 1024 * 1024f);
+        _globalPrimitiveByteTokens = Math.Min(
+            GlobalPrimitiveByteBurst,
+            _globalPrimitiveByteTokens + globalByteRate * elapsed);
+        return Mathf.FloorToInt(_globalPrimitiveTokens);
+    }
+
+    private static float GetMaximumPlayerRate() => Math.Max(
+        MinimumPrimitiveRate,
+        Math.Min(MaximumPrimitiveRate, _primitiveObjectsPerUpdate / _sendInterval));
+
+    private static float GetMaximumGlobalRate() => Math.Max(
+        InitialPrimitiveRate,
+        Math.Min(MaximumGlobalPrimitiveRate, _globalPrimitiveObjectsPerUpdate / _sendInterval));
 
     private static void ScanPlayer(Player player, PlayerState playerState)
     {
@@ -746,7 +1130,7 @@ public static class CullingManager
 
             if (!state.IsTransitioning && requested != state.CurrentLod)
                 BeginTransition(group, state, requested);
-            else if (state.IsTransitioning && requested != state.TargetLod)
+            else if (state.IsTransitioning)
                 state.RequestedLod = requested;
         }
 
@@ -763,6 +1147,10 @@ public static class CullingManager
     {
         bool leftShowing = left.State.TargetLod >= 0;
         bool rightShowing = right.State.TargetLod >= 0;
+        bool leftPrimitiveHide = left.Group.IsPrimitiveGroup && !leftShowing;
+        bool rightPrimitiveHide = right.Group.IsPrimitiveGroup && !rightShowing;
+        if (leftPrimitiveHide != rightPrimitiveHide)
+            return leftPrimitiveHide ? -1 : 1;
         if (leftShowing != rightShowing)
             return leftShowing ? -1 : 1;
         if (leftShowing && left.Group.IsPrimitiveGroup != right.Group.IsPrimitiveGroup)
@@ -819,50 +1207,124 @@ public static class CullingManager
         state.IsTransitioning = true;
     }
 
-    private static int ProcessTransition(CullGroup group, ViewState state, NetworkConnectionToClient connection, int budget)
+    private static SendUsage ProcessTransition(
+        CullGroup group,
+        ViewState state,
+        NetworkConnectionToClient connection,
+        int costBudget,
+        int byteBudget)
     {
-        int processed = 0;
-        while (processed < budget && state.ShowIndex < state.Showing.Count)
+        int attempts = 0;
+        int maxAttempts = Math.Max(TransitionAttemptMultiplier, costBudget * TransitionAttemptMultiplier);
+        while (attempts++ < maxAttempts)
         {
-            if (Show(state.Showing[state.ShowIndex++], connection))
-                processed++;
+            bool showing = state.ShowIndex < state.Showing.Count;
+            bool hiding = !showing && state.HideIndex < state.Hiding.Count;
+            if (!showing && !hiding)
+            {
+                state.CurrentLod = state.TargetLod;
+                state.IsTransitioning = false;
+                if (state.RequestedLod != state.CurrentLod)
+                {
+                    BeginTransition(group, state, state.RequestedLod);
+                    continue;
+                }
+                return default;
+            }
+
+            CullEntry entry = showing ? state.Showing[state.ShowIndex] : state.Hiding[state.HideIndex];
+            int units = GetEntryCostUnits(entry);
+            int bytes = GetEntryBytes(entry, showing);
+            // A collidable costs two units, but a valid emergency ceiling of one must still make
+            // progress. Permit one weighted operation to overdraw and repay it on later ticks.
+            if (bytes > byteBudget)
+                return default;
+
+            EntryApplyResult result = showing
+                ? TryShow(entry, connection)
+                : TryHide(entry, connection);
+            if (result == EntryApplyResult.RetryLater)
+                return default;
+
+            if (showing)
+                state.ShowIndex++;
+            else
+                state.HideIndex++;
+            if (result == EntryApplyResult.Sent)
+                return new SendUsage(1, units, bytes);
         }
-        while (processed < budget && state.ShowIndex >= state.Showing.Count && state.HideIndex < state.Hiding.Count)
-        {
-            if (Hide(state.Hiding[state.HideIndex++], connection))
-                processed++;
-        }
-        if (state.ShowIndex >= state.Showing.Count && state.HideIndex >= state.Hiding.Count)
-        {
-            state.CurrentLod = state.TargetLod;
-            state.IsTransitioning = false;
-            if (state.RequestedLod != state.CurrentLod)
-                BeginTransition(group, state, state.RequestedLod);
-        }
-        return processed;
+
+        return default;
     }
 
-    private static bool Show(CullEntry entry, NetworkConnectionToClient connection)
+    private static int GetEntryCostUnits(CullEntry entry) =>
+        entry.ClientPrimitive is { IsCollidable: true } ? 2 : 1;
+
+    private static int GetEntryBytes(CullEntry entry, bool showing)
     {
-        if (entry.ClientPrimitive != null)
-            return entry.ClientPrimitive.Show(connection);
-        NetworkIdentity? identity = entry.Identity;
-        if (identity == null || !identity.isServer || identity.observers.ContainsKey(connection.connectionId))
-            return false;
-        identity.AddObserver(connection);
-        return true;
+        if (entry.ClientPrimitive == null)
+            return 0;
+        int packed = showing
+            ? entry.ClientPrimitive.SpawnMessageSize
+            : entry.ClientPrimitive.DestroyMessageSize;
+        // Mirror's Batcher adds a varuint length prefix; five bytes is a conservative upper bound
+        // for the small primitive messages accepted by this optimizer.
+        return packed + 5;
     }
 
-    private static bool Hide(CullEntry entry, NetworkConnectionToClient connection)
+    private static EntryApplyResult TryShow(CullEntry entry, NetworkConnectionToClient connection)
     {
         if (entry.ClientPrimitive != null)
-            return entry.ClientPrimitive.Hide(connection);
+        {
+            if (entry.ClientPrimitive.IsDestroyed || entry.ClientPrimitive.IsVisibleTo(connection))
+                return EntryApplyResult.Complete;
+            return entry.ClientPrimitive.Show(connection)
+                ? EntryApplyResult.Sent
+                : EntryApplyResult.RetryLater;
+        }
+
         NetworkIdentity? identity = entry.Identity;
-        if (identity == null || !identity.isServer || !identity.observers.ContainsKey(connection.connectionId))
-            return false;
-        connection.RemoveFromObserving(identity, false);
-        identity.RemoveObserver(connection);
-        return true;
+        if (identity == null || !identity.isServer)
+            return EntryApplyResult.Complete;
+        if (identity.observers.ContainsKey(connection.connectionId))
+            return EntryApplyResult.Complete;
+        try
+        {
+            identity.AddObserver(connection);
+            return EntryApplyResult.Sent;
+        }
+        catch
+        {
+            return EntryApplyResult.RetryLater;
+        }
+    }
+
+    private static EntryApplyResult TryHide(CullEntry entry, NetworkConnectionToClient connection)
+    {
+        if (entry.ClientPrimitive != null)
+        {
+            if (entry.ClientPrimitive.IsDestroyed || !entry.ClientPrimitive.IsVisibleTo(connection))
+                return EntryApplyResult.Complete;
+            return entry.ClientPrimitive.Hide(connection)
+                ? EntryApplyResult.Sent
+                : EntryApplyResult.RetryLater;
+        }
+
+        NetworkIdentity? identity = entry.Identity;
+        if (identity == null || !identity.isServer)
+            return EntryApplyResult.Complete;
+        if (!identity.observers.ContainsKey(connection.connectionId))
+            return EntryApplyResult.Complete;
+        try
+        {
+            connection.RemoveFromObserving(identity, false);
+            identity.RemoveObserver(connection);
+            return EntryApplyResult.Sent;
+        }
+        catch
+        {
+            return EntryApplyResult.RetryLater;
+        }
     }
 
     private static bool TryGetReadyConnection(Player player, out NetworkConnectionToClient? connection)
@@ -896,7 +1358,10 @@ public static class CullingManager
 
         foreach (ClientPrimitive primitive in ClientPrimitiveGroups.Keys)
             foreach (NetworkConnectionToClient connection in PlayerStates.Keys)
+            {
                 primitive.Hide(connection);
+                primitive.ForgetViewer(connection);
+            }
 
         Groups.Clear();
         IdentityGroups.Clear();
@@ -913,9 +1378,15 @@ public static class CullingManager
 		OwnerScratch.Clear();
 		PrimitiveSchematicDistances.Clear();
 		_maxSpatialDistance = 0f;
+        _spatialDistanceDirty = false;
         _nextErrorLogTime = 0f;
         _playerCursor = 0;
         _nextPrimitiveGroupId = 0;
+        _globalPrimitiveTokens = 0f;
+        _globalPrimitiveRate = 0f;
+        _globalPrimitiveByteTokens = 0f;
+        _lastGlobalTokenUpdate = 0f;
+        _nextGlobalPressureSample = 0f;
     }
 
     private static string GetString(Dictionary<string, object> properties, string key) =>

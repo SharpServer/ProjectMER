@@ -22,6 +22,8 @@ namespace ProjectMER.Features;
 public static class PrimitiveOptimizationManager
 {
     private const int MaxAlwaysVisiblePrimitivesPerSchematic = 16;
+    private const int NativeRestoreQuantum = 32;
+    private const int FinalizationQuantum = 8;
 
     private sealed class OptimizedPrimitive
     {
@@ -360,7 +362,12 @@ public static class PrimitiveOptimizationManager
 
     private static void ProcessOptimizationBudget()
     {
-        float budgetMs = Math.Max(0.1f, CurrentConfig?.PrimitiveFinalizeFrameBudgetMs ?? 2f);
+        float configuredBudgetMs = Math.Max(0.1f, CurrentConfig?.PrimitiveFinalizeFrameBudgetMs ?? 2f);
+        float previousFrameMs = Time.unscaledDeltaTime * 1000f;
+        float frameScale = previousFrameMs > 33f
+            ? 0.1f
+            : previousFrameMs > 25f ? 0.25f : previousFrameMs > 20f ? 0.5f : 1f;
+        float budgetMs = Math.Max(0.1f, configuredBudgetMs * frameScale);
         Stopwatch stopwatch = Stopwatch.StartNew();
         // Failed plans already have disabled native primitives, so restoration takes priority over
         // applying or creating more optimized work.
@@ -374,7 +381,10 @@ public static class PrimitiveOptimizationManager
         if (NativeRestoreQueue.Count == 0)
             return;
 
-        while (NativeRestoreQueue.Count > 0 && stopwatch.Elapsed.TotalMilliseconds < budgetMs)
+        int processed = 0;
+        while (NativeRestoreQueue.Count > 0 &&
+               processed++ < NativeRestoreQuantum &&
+               stopwatch.Elapsed.TotalMilliseconds < budgetMs)
         {
             OptimizedPrimitive item = NativeRestoreQueue.Dequeue();
             if (item.Owner == null || item.Primitive == null ||
@@ -394,24 +404,26 @@ public static class PrimitiveOptimizationManager
         if (FinalizationQueue.Count == 0)
             return;
 
-        while (FinalizationQueue.Count > 0 && stopwatch.Elapsed.TotalMilliseconds < budgetMs)
+        int passes = FinalizationQueue.Count;
+        while (passes-- > 0 && FinalizationQueue.Count > 0 && stopwatch.Elapsed.TotalMilliseconds < budgetMs)
         {
-            FinalizeWork work = FinalizationQueue.Peek();
+            FinalizeWork work = FinalizationQueue.Dequeue();
             if (!IsOwnerGenerationAlive(work.Owner, work.Generation))
-            {
-                FinalizationQueue.Dequeue();
                 continue;
-            }
 
-            if (work.Index < work.Candidates.Count)
+            int processed = 0;
+            while (work.Index < work.Candidates.Count &&
+                   processed++ < FinalizationQuantum &&
+                   stopwatch.Elapsed.TotalMilliseconds < budgetMs)
             {
                 PrimitiveObjectToy primitive = work.Candidates[work.Index++];
                 TryOptimize(work, primitive);
-                continue;
             }
 
-            FinalizationQueue.Dequeue();
-            CommitFinalization(work);
+            if (work.Index >= work.Candidates.Count)
+                CommitFinalization(work);
+            else
+                FinalizationQueue.Enqueue(work);
         }
     }
 
@@ -648,9 +660,13 @@ public static class PrimitiveOptimizationManager
             }
 
             ClusterPlan plan = job.Task.GetAwaiter().GetResult();
-            while (job.ApplyIndex < plan.Clusters.Length && stopwatch.Elapsed.TotalMilliseconds < budgetMs)
+            int appliedThisPass = 0;
+            while (job.ApplyIndex < plan.Clusters.Length &&
+                   appliedThisPass < 4 &&
+                   stopwatch.Elapsed.TotalMilliseconds < budgetMs)
             {
                 ClusterSpec cluster = plan.Clusters[job.ApplyIndex++];
+                appliedThisPass++;
                 ClientPrimitive[] clientItems = cluster.Indices
                     .Where(index => index >= 0 && index < job.Items.Count)
                     .Select(index => job.Items[index].Client)

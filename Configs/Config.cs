@@ -40,12 +40,12 @@ public class Config
 	public float PrimitiveAlwaysVisibleSize { get; set; } = 10f;
 
 	[YamlMember(Alias = "primitive_objects_per_update")]
-	[Description("Maximum primitive objects processed per player update.")]
-	public int PrimitiveObjectsPerUpdate { get; set; } = 2;
+	[Description("Emergency ceiling for adaptive primitive send work per player tick. Collidable primitives consume two work units.")]
+	public int PrimitiveObjectsPerUpdate { get; set; } = 20;
 
 	[YamlMember(Alias = "primitive_global_objects_per_update")]
-	[Description("Maximum primitive objects processed globally per update.")]
-	public int PrimitiveGlobalObjectsPerUpdate { get; set; } = 32;
+	[Description("Emergency ceiling for adaptive primitive send work globally per tick. Sustained throughput is controlled automatically from frame time, RTT, and send queue pressure.")]
+	public int PrimitiveGlobalObjectsPerUpdate { get; set; } = 128;
 
 	[YamlMember(Alias = "culling_global_objects_per_update")]
 	[Description("Maximum culling objects processed globally per update.")]

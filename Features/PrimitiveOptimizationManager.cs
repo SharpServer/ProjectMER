@@ -22,6 +22,7 @@ namespace ProjectMER.Features;
 public static class PrimitiveOptimizationManager
 {
     private const int MaxAlwaysVisiblePrimitivesPerSchematic = 16;
+    private const int ConstructionFlushSize = 256;
     private const int NativeRestoreQuantum = 64;
     private const int FinalizationQuantum = 64;
     private const int FinalizationCommitChunkSize = 512;
@@ -49,6 +50,7 @@ public static class PrimitiveOptimizationManager
         public int Generation;
         public List<PrimitiveObjectToy> Candidates = null!;
         public Matrix4x4 OwnerWorldToLocal;
+        public bool AllowAlwaysVisible;
         public int Index;
         public readonly List<OptimizedPrimitive> Optimized = [];
         public readonly List<ClusterInput> ClusterInputs = [];
@@ -185,10 +187,27 @@ public static class PrimitiveOptimizationManager
             !isLeaf || !IsStaticCandidate(owner, primitive))
             return false;
 
+        bool assumedStatic = IsAssumedStatic(owner);
+        // A collidable primitive that is not covered by the explicit immutable-schematic promise
+        // must exist on the client immediately. Otherwise the server collider catches a player
+        // while the client repeatedly predicts a fall through an as-yet unsent floor.
+        if (primitive.PrimitiveFlags.HasFlag(PrimitiveFlags.Collidable) && !assumedStatic)
+            return false;
+
         if (!Pending.TryGetValue(owner, out List<PrimitiveObjectToy>? primitives))
             Pending[owner] = primitives = [];
         if (!primitives.Contains(primitive))
             primitives.Add(primitive);
+
+        // Explicitly assumed-static schematics may be finalized while they are still being built.
+        // This overlaps main-thread payload creation, worker clustering and network delivery with
+        // the remaining construction instead of leaving clients with no clusters for several minutes.
+        if (assumedStatic && primitives.Count >= ConstructionFlushSize)
+        {
+            List<PrimitiveObjectToy> batch = primitives.ToList();
+            primitives.Clear();
+            EnqueueFinalizationBatch(owner, batch, allowAlwaysVisible: false);
+        }
         return true;
     }
 
@@ -203,7 +222,16 @@ public static class PrimitiveOptimizationManager
         // hierarchy cache during finalization so deferred candidates are validated against the
         // completed runtime schematic, not the construction-time snapshot.
         StaticHierarchySafety.Remove(owner);
-        if (pending.Count == 0)
+        if (pending.Count > 0)
+            EnqueueFinalizationBatch(owner, pending, allowAlwaysVisible: true);
+    }
+
+    private static void EnqueueFinalizationBatch(
+        SchematicObject owner,
+        List<PrimitiveObjectToy> candidates,
+        bool allowAlwaysVisible)
+    {
+        if (candidates.Count == 0 || owner == null)
             return;
 
         if (!Owners.TryGetValue(owner, out OwnerState? state))
@@ -213,8 +241,9 @@ public static class PrimitiveOptimizationManager
         {
             Owner = owner,
             Generation = state.Generation,
-            Candidates = pending,
+            Candidates = candidates,
             OwnerWorldToLocal = owner.transform.worldToLocalMatrix,
+            AllowAlwaysVisible = allowAlwaysVisible,
         });
     }
 
@@ -449,7 +478,7 @@ public static class PrimitiveOptimizationManager
 
             if (work.Index >= work.Candidates.Count)
             {
-                SubmitFinalizationBatch(work, allowAlwaysVisible: true);
+                SubmitFinalizationBatch(work, work.AllowAlwaysVisible);
             }
             else
             {

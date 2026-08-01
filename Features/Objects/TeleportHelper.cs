@@ -50,8 +50,13 @@ internal static class TeleportHelper
 
 			if (player.RoleBase is not IFpcRole fpcRole || !IsInside(trigger, player, fpcRole))
 			{
-				// Player is not (or no longer) inside this trigger: clear any arrival hold.
-				ignoredPlayers.Remove(hub);
+				// Keep the arrival hold for the whole cooldown. The server-side motor can briefly
+				// correct a freshly teleported player back into the destination trigger on a later
+				// physics step; releasing the hold immediately on the first outside sample then
+				// allows one delayed bounce as soon as the cooldown expires.
+				if (!IsOnCooldown(player))
+					ignoredPlayers.Remove(hub);
+
 				continue;
 			}
 

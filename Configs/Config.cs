@@ -47,6 +47,10 @@ public class Config
 	[Description("Emergency ceiling for adaptive primitive send work globally per tick. Sustained throughput is controlled automatically from frame time, RTT, and send queue pressure.")]
 	public int PrimitiveGlobalObjectsPerUpdate { get; set; } = 256;
 
+	[YamlMember(Alias = "primitive_transition_burst_objects")]
+	[Description("Maximum weighted primitive work sent for one nearest cluster before rotating to another. Higher values finish nearby geometry sooner instead of leaving many clusters partially visible.")]
+	public int PrimitiveTransitionBurstObjects { get; set; } = 16;
+
 	[YamlMember(Alias = "culling_global_objects_per_update")]
 	[Description("Maximum culling objects processed globally per update.")]
 	public int CullingGlobalObjectsPerUpdate { get; set; } = 64;
@@ -90,6 +94,14 @@ public class Config
 	[YamlMember(Alias = "primitive_global_byte_burst_bytes")]
 	[Description("Global primitive send byte burst shared by all ready clients.")]
 	public int PrimitiveGlobalByteBurstBytes { get; set; } = 1024 * 1024;
+
+	[YamlMember(Alias = "primitive_max_bytes_per_second")]
+	[Description("Maximum adaptive primitive bandwidth generated per ready client. Reliable queue and RTT pressure can reduce or pause it automatically.")]
+	public int PrimitiveMaxBytesPerSecond { get; set; } = 2 * 1024 * 1024;
+
+	[YamlMember(Alias = "primitive_global_max_bytes_per_second")]
+	[Description("Maximum adaptive primitive bandwidth generated across all ready clients.")]
+	public int PrimitiveGlobalMaxBytesPerSecond { get; set; } = 8 * 1024 * 1024;
 
 	[YamlMember(Alias = "primitive_batch_soft_limit_bytes")]
 	[Description("Reliable batch byte pressure threshold at which adaptive primitive sends begin backing off.")]

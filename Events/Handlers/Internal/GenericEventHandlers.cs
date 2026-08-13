@@ -87,6 +87,11 @@ public class GenericEventsHandler : CustomEventsHandler
 		});
 	}
 
+	public override void OnPlayerChangedSpectator(PlayerChangedSpectatorEventArgs ev)
+	{
+		CullingManager.RequestPlayerRescan(ev.Player);
+	}
+
 	public override void OnPlayerInteractingShootingTarget(PlayerInteractingShootingTargetEventArgs ev)
 	{
 		if (ev.ShootingTarget.GameObject.TryGetComponent(out MapEditorObject _))

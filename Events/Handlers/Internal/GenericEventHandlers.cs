@@ -15,11 +15,15 @@ public class GenericEventsHandler : CustomEventsHandler
 	{
 		// 前ラウンドの synthetic netId を先に破棄してから、新しい世代を開始する。
 		CullingManager.Stop();
+		// WaitingForPlayers is also reached after forced/admin restarts where RoundEnded may not have
+		// completed. Unload any surviving maps instead of only forgetting their dictionary entries;
+		// otherwise their GameObjects and staggered-load coroutines can accumulate across rounds.
+		foreach (string mapName in MapUtils.LoadedMaps.Keys.ToArray())
+			MapUtils.UnloadMap(mapName);
 		PrimitiveOptimizationManager.Stop();
 
 		PrefabManager.RegisterPrefabs();
 
-		MapUtils.LoadedMaps.Clear();
 		ToolGunItem.ItemDictionary.Clear();
 		ToolGunHandler.PlayerSelectedObjectDict.Clear();
 		PickupEventsHandler.ButtonPickups.Clear();

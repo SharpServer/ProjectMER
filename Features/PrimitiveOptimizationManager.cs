@@ -24,9 +24,34 @@ public static class PrimitiveOptimizationManager
     private const int MaxAlwaysVisiblePrimitivesPerSchematic = 16;
     private const int ConstructionFlushSize = 256;
     private const int NativeRestoreQuantum = 64;
-    private const int FinalizationQuantum = 64;
     private const int FinalizationCommitChunkSize = 512;
-    private const int ClusterApplyQuantum = 32;
+
+    /// <summary>Low-overhead current primitive optimization counters.</summary>
+    public readonly struct DiagnosticsSnapshot
+    {
+        public readonly int OptimizedPrimitives;
+        public readonly int FallbackPrimitives;
+        public readonly int PendingGroups;
+        public readonly int PendingPrimitives;
+        public readonly int CompletedGroups;
+        public readonly int DeactivatedPrimitives;
+
+        public DiagnosticsSnapshot(
+            int optimizedPrimitives,
+            int fallbackPrimitives,
+            int pendingGroups,
+            int pendingPrimitives,
+            int completedGroups,
+            int deactivatedPrimitives)
+        {
+            OptimizedPrimitives = optimizedPrimitives;
+            FallbackPrimitives = fallbackPrimitives;
+            PendingGroups = pendingGroups;
+            PendingPrimitives = pendingPrimitives;
+            CompletedGroups = completedGroups;
+            DeactivatedPrimitives = deactivatedPrimitives;
+        }
+    }
 
     private sealed class OptimizedPrimitive
     {
@@ -36,6 +61,8 @@ public static class PrimitiveOptimizationManager
         public bool WasEnabled;
         public bool WasRendererEnabled;
         public bool WasColliderEnabled;
+        public bool WasActiveSelf;
+        public bool WasDeactivated;
     }
 
     private sealed class OwnerState
@@ -51,6 +78,7 @@ public static class PrimitiveOptimizationManager
         public List<PrimitiveObjectToy> Candidates = null!;
         public Matrix4x4 OwnerWorldToLocal;
         public bool AllowAlwaysVisible;
+        public bool Invalidated;
         public int Index;
         public readonly List<OptimizedPrimitive> Optimized = [];
         public readonly List<ClusterInput> ClusterInputs = [];
@@ -161,6 +189,11 @@ public static class PrimitiveOptimizationManager
     private static int _mainThreadId;
     private static bool _started;
     private static bool _externalMeroOptimizerLoaded;
+    private static int _optimizedPrimitiveCount;
+    private static int _fallbackPrimitiveCount;
+    private static int _completedGroupCount;
+    private static int _deactivatedPrimitiveCount;
+    private static int _clusterApplyCursor;
 
     private static Config? CurrentConfig => ProjectMER.Singleton?.Config;
 
@@ -312,7 +345,11 @@ public static class PrimitiveOptimizationManager
 
         foreach (ClusterJob job in ClusterJobs)
             foreach (OptimizedPrimitive item in job.Items)
+            {
+                if (restoreNative)
+                    RestoreNative(item, spawn: NetworkServer.active);
                 item.Client?.Invalidate();
+            }
 
         Pending.Clear();
         Owners.Clear();
@@ -324,6 +361,11 @@ public static class PrimitiveOptimizationManager
         ExcludedOwners.Clear();
         ExcludedPrimitiveNames.Clear();
         _clusterWorkers = null;
+        _optimizedPrimitiveCount = 0;
+        _fallbackPrimitiveCount = 0;
+        _completedGroupCount = 0;
+        _deactivatedPrimitiveCount = 0;
+        _clusterApplyCursor = 0;
     }
 
     /// <summary>Unregisters all pending and optimized primitives owned by a schematic.</summary>
@@ -339,13 +381,18 @@ public static class PrimitiveOptimizationManager
         ExcludedPrimitiveNames.Remove(owner);
         foreach (FinalizeWork work in FinalizationQueue.Where(work => work.Owner == owner).ToArray())
         {
-            // Removing from the queue is done below; invalidating the generation makes a raced worker
-            // harmless even when its completion callback has already been queued.
-            work.Generation++;
+            // Queue<T> cannot remove an arbitrary item. Mark it dead so the next budget pass drops
+            // it without depending on a destroyed Unity object as a dictionary key.
+            work.Invalidated = true;
+            foreach (OptimizedPrimitive item in work.Optimized)
+                item.Client.Invalidate();
         }
 
         if (!Owners.TryGetValue(owner, out OwnerState? state))
+        {
+            RemoveClusterJobs(owner);
             return;
+        }
 
         state.Generation++;
         foreach (OptimizedPrimitive item in state.Items)
@@ -356,6 +403,11 @@ public static class PrimitiveOptimizationManager
         state.Items.Clear();
         Owners.Remove(owner);
 
+        RemoveClusterJobs(owner);
+    }
+
+    private static void RemoveClusterJobs(SchematicObject owner)
+    {
         for (int i = ClusterJobs.Count - 1; i >= 0; i--)
         {
             if (ClusterJobs[i].Owner != owner)
@@ -460,16 +512,20 @@ public static class PrimitiveOptimizationManager
         if (FinalizationQueue.Count == 0)
             return;
 
-        int passes = FinalizationQueue.Count;
-        while (passes-- > 0 && FinalizationQueue.Count > 0 && stopwatch.Elapsed.TotalMilliseconds < budgetMs)
+        // Rotate work items after each bounded burst. This lets several schematics make progress
+        // in one frame while still giving a large schematic more than the old fixed 64-item slice
+        // whenever the frame budget has room.
+        while (FinalizationQueue.Count > 0 &&
+               stopwatch.Elapsed.TotalMilliseconds < budgetMs)
         {
             FinalizeWork work = FinalizationQueue.Dequeue();
-            if (!IsOwnerGenerationAlive(work.Owner, work.Generation))
+            if (work.Invalidated || !IsOwnerGenerationAlive(work.Owner, work.Generation))
                 continue;
 
+            int burst = GetAdaptiveFinalizationBurst(FinalizationQueue.Count + 1);
             int processed = 0;
             while (work.Index < work.Candidates.Count &&
-                   processed++ < FinalizationQuantum &&
+                   processed++ < burst &&
                    stopwatch.Elapsed.TotalMilliseconds < budgetMs)
             {
                 PrimitiveObjectToy primitive = work.Candidates[work.Index++];
@@ -492,11 +548,22 @@ public static class PrimitiveOptimizationManager
         }
     }
 
+    private static int GetAdaptiveFinalizationBurst(int pendingGroups)
+    {
+        int configured = Math.Max(1, CurrentConfig?.PrimitiveFinalizeAdaptiveBurst ?? 256);
+        // Keep each pending schematic represented in the frame, while allowing the same queue
+        // item to receive multiple bursts when it is the only remaining producer.
+        int fairnessDivisor = Math.Max(1, Math.Min(pendingGroups, 8));
+        return Math.Max(1, configured / fairnessDivisor);
+    }
+
     private static void TryOptimize(FinalizeWork work, PrimitiveObjectToy primitive)
     {
         if (primitive == null || !IsStaticCandidate(work.Owner, primitive) ||
             !ClientPrimitive.TryCreate(work.Owner, primitive, out ClientPrimitive? client) || client == null)
         {
+            if (primitive != null)
+                _fallbackPrimitiveCount++;
             if (primitive != null)
                 SpawnNative(primitive);
             return;
@@ -510,20 +577,33 @@ public static class PrimitiveOptimizationManager
             WasEnabled = primitive.enabled,
             WasRendererEnabled = primitive._renderer != null && primitive._renderer.enabled,
             WasColliderEnabled = primitive._collider != null && primitive._collider.enabled,
+            WasActiveSelf = primitive.gameObject.activeSelf,
         };
         int optimizedIndex = work.Optimized.Count;
         ClusterInput clusterInput = CreateClusterInput(optimized, work.OwnerWorldToLocal, optimizedIndex);
 
         // The primitive stays in the hierarchy for collisions, scripts and SchematicBlock lookups.
         // Only its network behaviour and renderer are hibernated; non-collidable colliders are disabled.
+        // Explicitly assumed-static decorative leaves may additionally be soft-deactivated below;
+        // no GameObject/component is destroyed or removed from metadata lists.
         primitive.enabled = false;
         if (primitive._renderer != null)
             primitive._renderer.enabled = false;
         if (primitive._collider != null)
             primitive._collider.enabled = client.IsCollidable;
         primitive.transform.hasChanged = false;
+        if (!client.IsCollidable && optimized.WasActiveSelf && IsLocallyStatic(primitive.transform) &&
+            IsAssumedStatic(work.Owner) && CurrentConfig?.PrimitiveDeactivateNoncollidableAssumedStatic == true)
+        {
+            // Capture all Unity/Mirror state before deactivation. No hierarchy/component lookup is
+            // performed after this call; explicit schematic metadata remains the source of truth.
+            primitive.gameObject.SetActive(false);
+            optimized.WasDeactivated = true;
+            _deactivatedPrimitiveCount++;
+        }
         work.Optimized.Add(optimized);
         work.ClusterInputs.Add(clusterInput);
+        _optimizedPrimitiveCount++;
     }
 
     private static void SubmitFinalizationBatch(FinalizeWork work, bool allowAlwaysVisible)
@@ -699,21 +779,25 @@ public static class PrimitiveOptimizationManager
 
     private static void ApplyCompletedPlans(Stopwatch stopwatch, float budgetMs)
     {
-        // Process oldest jobs first. A LIFO walk lets a continuous stream of newly completed
-        // schematics starve an older partially-applied plan, leaving its native renderers disabled.
-        for (int i = 0;
-             i < ClusterJobs.Count && stopwatch.Elapsed.TotalMilliseconds < budgetMs;)
+        // Process completed jobs round-robin. A single pass with a fixed per-job quantum can leave
+        // a large plan disabled for many frames, while a rotating burst lets all ready schematics
+        // converge fairly under the same frame budget.
+        int index = ClusterJobs.Count == 0 ? 0 : _clusterApplyCursor % ClusterJobs.Count;
+        int remainingThisPass = ClusterJobs.Count;
+        while (ClusterJobs.Count > 0 && remainingThisPass-- > 0 && stopwatch.Elapsed.TotalMilliseconds < budgetMs)
         {
-            ClusterJob job = ClusterJobs[i];
+            if (index >= ClusterJobs.Count)
+                index = 0;
+            ClusterJob job = ClusterJobs[index];
             if (!job.Task.IsCompleted)
             {
-                i++;
+                index++;
                 continue;
             }
 
             if (job.Task.IsCanceled || job.Task.IsFaulted)
             {
-                ClusterJobs.RemoveAt(i);
+                ClusterJobs.RemoveAt(index);
                 foreach (OptimizedPrimitive item in job.Items)
                     NativeRestoreQueue.Enqueue(item);
                 if (job.Task.IsFaulted)
@@ -723,7 +807,7 @@ public static class PrimitiveOptimizationManager
 
             if (!IsOwnerGenerationAlive(job.Owner, job.Generation) || !Owners.TryGetValue(job.Owner, out OwnerState? state))
             {
-                ClusterJobs.RemoveAt(i);
+                ClusterJobs.RemoveAt(index);
                 foreach (OptimizedPrimitive item in job.Items)
                     item.Client.Invalidate();
                 continue;
@@ -732,7 +816,7 @@ public static class PrimitiveOptimizationManager
             ClusterPlan plan = job.Task.GetAwaiter().GetResult();
             int appliedThisPass = 0;
             while (job.ApplyIndex < plan.Clusters.Length &&
-                   appliedThisPass < ClusterApplyQuantum &&
+                   appliedThisPass < GetAdaptiveFinalizationBurst(ClusterJobs.Count) &&
                    stopwatch.Elapsed.TotalMilliseconds < budgetMs)
             {
                 ClusterSpec cluster = plan.Clusters[job.ApplyIndex++];
@@ -753,10 +837,43 @@ public static class PrimitiveOptimizationManager
             }
 
 			if (job.ApplyIndex >= plan.Clusters.Length)
-				ClusterJobs.RemoveAt(i);
+			{
+				ClusterJobs.RemoveAt(index);
+				_completedGroupCount++;
+			}
 			else
-				i++;
+				index++;
         }
+
+        _clusterApplyCursor = ClusterJobs.Count == 0 ? 0 : index % ClusterJobs.Count;
+    }
+
+    /// <summary>Returns a snapshot without allocating or touching Unity objects.</summary>
+    public static DiagnosticsSnapshot GetDiagnosticsSnapshot()
+    {
+        int pendingPrimitives = 0;
+        foreach (FinalizeWork work in FinalizationQueue)
+            pendingPrimitives += Math.Max(0, work.Candidates.Count - work.Index) + work.Optimized.Count;
+        foreach (ClusterJob job in ClusterJobs)
+        {
+            if (!job.Task.IsCompleted || job.Task.IsCanceled || job.Task.IsFaulted)
+            {
+                pendingPrimitives += job.Items.Count;
+                continue;
+            }
+
+            ClusterPlan plan = job.Task.Result;
+            for (int i = job.ApplyIndex; i < plan.Clusters.Length; i++)
+                pendingPrimitives += plan.Clusters[i].Indices.Length;
+        }
+
+        return new DiagnosticsSnapshot(
+            _optimizedPrimitiveCount,
+            _fallbackPrimitiveCount,
+            FinalizationQueue.Count + ClusterJobs.Count,
+            pendingPrimitives,
+            _completedGroupCount,
+            _deactivatedPrimitiveCount);
     }
 
     private static bool IsStaticCandidate(SchematicObject owner, PrimitiveObjectToy primitive)
@@ -960,6 +1077,8 @@ public static class PrimitiveOptimizationManager
         PrimitiveObjectToy primitive = item.Primitive;
         if (primitive == null)
             return;
+        if (item.WasDeactivated && primitive.gameObject != null)
+            primitive.gameObject.SetActive(item.WasActiveSelf);
         primitive.enabled = item.WasEnabled;
         if (primitive._renderer != null)
             primitive._renderer.enabled = item.WasRendererEnabled;

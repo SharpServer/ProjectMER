@@ -22,18 +22,8 @@ public static class CullingManager
     // Spawn/Destroy must remain reliable and ordered for vanilla clients. Throughput is therefore
     // controlled with byte/object token buckets and AIMD feedback instead of a fixed tiny cap.
     private const float MinimumSchedulerInterval = 0.02f;
-    private const float InitialPrimitiveRate = 120f;
     private const float MinimumPrimitiveRate = 20f;
-    private const float MaximumPrimitiveRate = 320f;
-    private const float InitialGlobalPrimitiveRate = 800f;
-    private const float MaximumGlobalPrimitiveRate = 1600f;
     private const float PressureSampleInterval = 0.25f;
-    private const int MirrorBatchSoftLimitBytes = 16 * 1024;
-    private const int MirrorBatchHardLimitBytes = 48 * 1024;
-    private const int PrimitiveByteBurst = 64 * 1024;
-    private const int GlobalPrimitiveByteBurst = 256 * 1024;
-    private const int ReliableQueueSoftLimit = 16;
-    private const int ReliableQueueHardLimit = 48;
     private const int TransitionAttemptMultiplier = 4;
 
     private sealed class CullEntry
@@ -187,7 +177,7 @@ public static class CullingManager
         public int PrimitiveTransitionCursor;
         public float PrimitiveTokens;
         public float PrimitiveByteTokens;
-        public float PrimitiveRate = InitialPrimitiveRate;
+        public float PrimitiveRate;
         public float LastTokenUpdate;
         public float NextPressureSample;
         public float BaselineRttMs = float.PositiveInfinity;
@@ -320,6 +310,22 @@ public static class CullingManager
     private static float _globalPrimitiveByteTokens;
     private static float _lastGlobalTokenUpdate;
     private static float _nextGlobalPressureSample;
+    private static float _initialPrimitiveRate;
+    private static int _primitiveInitialBurstObjects;
+    private static float _maximumPrimitiveRate;
+    private static float _initialGlobalPrimitiveRate;
+    private static float _maximumGlobalPrimitiveRate;
+    private static int _mirrorBatchSoftLimitBytes;
+    private static int _mirrorBatchHardLimitBytes;
+    private static int _primitiveByteBurst;
+    private static int _globalPrimitiveByteBurst;
+    private static int _reliableQueueSoftLimit;
+    private static int _reliableQueueHardLimit;
+    private static bool _diagnosticsEnabled;
+    private static float _nextDiagnosticsLog;
+    private static long _diagnosticSentObjects;
+    private static long _diagnosticSentBytes;
+    private static long _diagnosticPressureSamples;
 
     public static void PrepareStandalone(NetworkIdentity identity)
     {
@@ -505,9 +511,31 @@ public static class CullingManager
         _globalPrimitiveObjectsPerUpdate = Math.Max(
             _primitiveObjectsPerUpdate,
             config.PrimitiveGlobalObjectsPerUpdate);
-        _globalPrimitiveTokens = Math.Min(_globalPrimitiveObjectsPerUpdate, InitialGlobalPrimitiveRate * _sendInterval);
-        _globalPrimitiveRate = Math.Min(GetMaximumGlobalRate(), InitialGlobalPrimitiveRate);
-        _globalPrimitiveByteTokens = GlobalPrimitiveByteBurst;
+        _initialPrimitiveRate = Math.Max(MinimumPrimitiveRate, config.PrimitiveInitialObjectsPerSecond);
+        _primitiveInitialBurstObjects = Math.Max(1, config.PrimitiveInitialBurstObjects);
+        _maximumPrimitiveRate = Math.Max(_initialPrimitiveRate, config.PrimitiveMaxObjectsPerSecond);
+        _initialGlobalPrimitiveRate = Math.Max(_initialPrimitiveRate, config.PrimitiveGlobalInitialObjectsPerSecond);
+        _maximumGlobalPrimitiveRate = Math.Max(_initialGlobalPrimitiveRate, config.PrimitiveGlobalMaxObjectsPerSecond);
+        _mirrorBatchSoftLimitBytes = Math.Max(1024, config.PrimitiveBatchSoftLimitBytes);
+        _mirrorBatchHardLimitBytes = Math.Max(_mirrorBatchSoftLimitBytes, config.PrimitiveBatchHardLimitBytes);
+        // Keep the per-client token burst at least as large as the hard batch ceiling so a valid
+        // configured batch limit is not silently made unreachable by a smaller byte bucket.
+        _primitiveByteBurst = Math.Max(_mirrorBatchHardLimitBytes, config.PrimitiveByteBurstBytes);
+        _globalPrimitiveByteBurst = Math.Max(_primitiveByteBurst, config.PrimitiveGlobalByteBurstBytes);
+        _reliableQueueSoftLimit = Math.Max(1, config.PrimitiveReliableQueueSoftLimit);
+        _reliableQueueHardLimit = Math.Max(_reliableQueueSoftLimit, config.PrimitiveReliableQueueHardLimit);
+        _diagnosticsEnabled = config.PrimitiveDiagnosticsEnabled;
+        _diagnosticSentObjects = 0;
+        _diagnosticSentBytes = 0;
+        _diagnosticPressureSamples = 0;
+        _nextDiagnosticsLog = Time.realtimeSinceStartup + 10f;
+        foreach (PlayerState state in PlayerStates.Values)
+            state.PrimitiveRate = _initialPrimitiveRate;
+        _globalPrimitiveTokens = Math.Min(
+            _globalPrimitiveObjectsPerUpdate,
+            Math.Max(_primitiveInitialBurstObjects, _initialGlobalPrimitiveRate * _sendInterval));
+        _globalPrimitiveRate = Math.Min(GetMaximumGlobalRate(), _initialGlobalPrimitiveRate);
+        _globalPrimitiveByteTokens = _globalPrimitiveByteBurst;
         _lastGlobalTokenUpdate = Time.realtimeSinceStartup;
         _nextGlobalPressureSample = _lastGlobalTokenUpdate + PressureSampleInterval;
         _downgradeDelay = Math.Max(0f, config.CullingDowngradeDelay);
@@ -517,7 +545,7 @@ public static class CullingManager
         if (_primitiveEnabled)
         {
             Logger.Info(
-                $"[CullingManager] Adaptive primitive sender enabled: {InitialPrimitiveRate:0}-" +
+                $"[CullingManager] Adaptive primitive sender enabled: {_initialPrimitiveRate:0}-" +
                 $"{GetMaximumPlayerRate():0} work/s per client, {_globalPrimitiveRate:0}-" +
                 $"{GetMaximumGlobalRate():0} global work/s, {_primitiveObjectsPerUpdate}/" +
                 $"{_globalPrimitiveObjectsPerUpdate} emergency tick ceilings.");
@@ -746,6 +774,24 @@ public static class CullingManager
         }
         _globalPrimitiveTokens = Math.Max(0f, _globalPrimitiveTokens - primitiveGlobalUsed);
         _globalPrimitiveByteTokens = Math.Max(0f, _globalPrimitiveByteTokens - primitiveGlobalBytesUsed);
+        if (_diagnosticsEnabled && Time.realtimeSinceStartup >= _nextDiagnosticsLog)
+        {
+            _nextDiagnosticsLog = Time.realtimeSinceStartup + 10f;
+            PrimitiveOptimizationManager.DiagnosticsSnapshot snapshot =
+                PrimitiveOptimizationManager.GetDiagnosticsSnapshot();
+            int pendingTransitions = 0;
+            foreach (PlayerState state in PlayerStates.Values)
+                foreach (ViewState view in state.Views.Values)
+                    if (view.IsTransitioning)
+                        pendingTransitions++;
+            Logger.Info($"[CullingManager] Primitive snapshot optimized={snapshot.OptimizedPrimitives} fallback={snapshot.FallbackPrimitives} " +
+                $"deactivated={snapshot.DeactivatedPrimitives} pendingGroups={snapshot.PendingGroups} pending={snapshot.PendingPrimitives} completed={snapshot.CompletedGroups} " +
+                $"groups={ClientPrimitiveGroups.Count} players={PlayerStates.Count} transitions={pendingTransitions} " +
+                $"rate={_globalPrimitiveRate:0} sent={_diagnosticSentObjects} bytes={_diagnosticSentBytes} pressure={_diagnosticPressureSamples}.");
+            _diagnosticSentObjects = 0;
+            _diagnosticSentBytes = 0;
+            _diagnosticPressureSamples = 0;
+        }
         _playerCursor = ((lastServed >= 0 ? lastServed : start) + 1) % ReadyPlayers.Count;
     }
 
@@ -811,8 +857,11 @@ public static class CullingManager
         {
             PlayerStates[connection] = playerState = new PlayerState
             {
-                PrimitiveTokens = Math.Min(_primitiveObjectsPerUpdate, InitialPrimitiveRate * _sendInterval),
-                PrimitiveByteTokens = PrimitiveByteBurst,
+                PrimitiveRate = _initialPrimitiveRate,
+                PrimitiveTokens = Math.Min(
+                    _primitiveObjectsPerUpdate,
+                    Math.Max(_primitiveInitialBurstObjects, _initialPrimitiveRate * _sendInterval)),
+                PrimitiveByteTokens = _primitiveByteBurst,
                 LastTokenUpdate = now,
                 NextPressureSample = now,
             };
@@ -851,7 +900,7 @@ public static class CullingManager
         int pendingBatchBytes = GetPendingBatchBytes(connection);
         int primitiveByteBudget = Math.Min(
             Math.Min(Mathf.FloorToInt(playerState.PrimitiveByteTokens), primitiveGlobalByteBudget),
-            Math.Max(0, MirrorBatchHardLimitBytes - pendingBatchBytes));
+            Math.Max(0, _mirrorBatchHardLimitBytes - pendingBatchBytes));
         if (primitiveBudget <= 0 || primitiveByteBudget <= 0)
             return 0;
 
@@ -867,6 +916,8 @@ public static class CullingManager
         playerState.PrimitiveTokens = Math.Max(0f, playerState.PrimitiveTokens - primitiveUsage.CostUnits);
         playerState.PrimitiveByteTokens = Math.Max(0f, playerState.PrimitiveByteTokens - primitiveUsage.Bytes);
         served |= primitiveUsage.Operations > 0;
+        _diagnosticSentObjects += primitiveUsage.Operations;
+        _diagnosticSentBytes += primitiveUsage.Bytes;
         return primitiveUsage.CostUnits;
     }
 
@@ -961,22 +1012,23 @@ public static class CullingManager
         {
             state.NextPressureSample = now + PressureSampleInterval;
             ConnectionPressure pressure = GetConnectionPressure(connection);
+            _diagnosticPressureSamples++;
             if (pressure.RttMs > 0f)
             {
                 if (float.IsPositiveInfinity(state.BaselineRttMs) || pressure.RttMs < state.BaselineRttMs)
                     state.BaselineRttMs = pressure.RttMs;
-                else if (pressure.ReliableQueue == 0 && pressure.PendingBatchBytes < MirrorBatchSoftLimitBytes)
+                else if (pressure.ReliableQueue == 0 && pressure.PendingBatchBytes < _mirrorBatchSoftLimitBytes)
                     state.BaselineRttMs = Mathf.Lerp(state.BaselineRttMs, pressure.RttMs, 0.05f);
             }
 
             float baseline = float.IsPositiveInfinity(state.BaselineRttMs)
                 ? Math.Max(1f, pressure.RttMs)
                 : state.BaselineRttMs;
-            bool hardPressure = pressure.PendingBatchBytes >= MirrorBatchHardLimitBytes ||
-                pressure.ReliableQueue >= ReliableQueueHardLimit ||
+            bool hardPressure = pressure.PendingBatchBytes >= _mirrorBatchHardLimitBytes ||
+                pressure.ReliableQueue >= _reliableQueueHardLimit ||
                 pressure.RttMs > Math.Max(baseline * 3f, baseline + 180f);
-            bool softPressure = pressure.PendingBatchBytes >= MirrorBatchSoftLimitBytes ||
-                pressure.ReliableQueue >= ReliableQueueSoftLimit ||
+            bool softPressure = pressure.PendingBatchBytes >= _mirrorBatchSoftLimitBytes ||
+                pressure.ReliableQueue >= _reliableQueueSoftLimit ||
                 pressure.RttMs > Math.Max(baseline * 1.75f, baseline + 75f) ||
                 Time.unscaledDeltaTime > 0.025f;
 
@@ -1007,7 +1059,7 @@ public static class CullingManager
             state.PrimitiveTokens + state.PrimitiveRate * elapsed);
         float byteRate = Mathf.Clamp(state.PrimitiveRate * 512f, 32 * 1024f, 512 * 1024f);
         state.PrimitiveByteTokens = Math.Min(
-            PrimitiveByteBurst,
+            _primitiveByteBurst,
             state.PrimitiveByteTokens + byteRate * elapsed);
     }
 
@@ -1064,9 +1116,9 @@ public static class CullingManager
         {
             _nextGlobalPressureSample = now + PressureSampleInterval;
             if (Time.unscaledDeltaTime > 0.03f)
-                _globalPrimitiveRate = Math.Max(InitialPrimitiveRate, _globalPrimitiveRate * 0.5f);
+                _globalPrimitiveRate = Math.Max(_initialPrimitiveRate, _globalPrimitiveRate * 0.5f);
             else if (Time.unscaledDeltaTime > 0.022f)
-                _globalPrimitiveRate = Math.Max(InitialPrimitiveRate, _globalPrimitiveRate * 0.8f);
+                _globalPrimitiveRate = Math.Max(_initialPrimitiveRate, _globalPrimitiveRate * 0.8f);
             else
                 _globalPrimitiveRate = Math.Min(
                     GetMaximumGlobalRate(),
@@ -1079,18 +1131,18 @@ public static class CullingManager
             _globalPrimitiveTokens + _globalPrimitiveRate * elapsed);
         float globalByteRate = Mathf.Clamp(_globalPrimitiveRate * 512f, 256 * 1024f, 2 * 1024 * 1024f);
         _globalPrimitiveByteTokens = Math.Min(
-            GlobalPrimitiveByteBurst,
+            _globalPrimitiveByteBurst,
             _globalPrimitiveByteTokens + globalByteRate * elapsed);
         return Mathf.FloorToInt(_globalPrimitiveTokens);
     }
 
     private static float GetMaximumPlayerRate() => Math.Max(
         MinimumPrimitiveRate,
-        Math.Min(MaximumPrimitiveRate, _primitiveObjectsPerUpdate / _sendInterval));
+        Math.Min(_maximumPrimitiveRate, _primitiveObjectsPerUpdate / _sendInterval));
 
     private static float GetMaximumGlobalRate() => Math.Max(
-        InitialPrimitiveRate,
-        Math.Min(MaximumGlobalPrimitiveRate, _globalPrimitiveObjectsPerUpdate / _sendInterval));
+        _initialPrimitiveRate,
+        Math.Min(_maximumGlobalPrimitiveRate, _globalPrimitiveObjectsPerUpdate / _sendInterval));
 
     private static void ScanPlayer(Player player, PlayerState playerState)
     {
@@ -1387,6 +1439,22 @@ public static class CullingManager
         _globalPrimitiveByteTokens = 0f;
         _lastGlobalTokenUpdate = 0f;
         _nextGlobalPressureSample = 0f;
+        _initialPrimitiveRate = 0f;
+        _maximumPrimitiveRate = 0f;
+        _initialGlobalPrimitiveRate = 0f;
+        _maximumGlobalPrimitiveRate = 0f;
+        _mirrorBatchSoftLimitBytes = 0;
+        _mirrorBatchHardLimitBytes = 0;
+        _primitiveByteBurst = 0;
+        _globalPrimitiveByteBurst = 0;
+        _reliableQueueSoftLimit = 0;
+        _reliableQueueHardLimit = 0;
+        _primitiveInitialBurstObjects = 0;
+        _diagnosticsEnabled = false;
+        _nextDiagnosticsLog = 0f;
+        _diagnosticSentObjects = 0;
+        _diagnosticSentBytes = 0;
+        _diagnosticPressureSamples = 0;
     }
 
     private static string GetString(Dictionary<string, object> properties, string key) =>

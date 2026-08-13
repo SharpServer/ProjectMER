@@ -40,12 +40,12 @@ public class Config
 	public float PrimitiveAlwaysVisibleSize { get; set; } = 10f;
 
 	[YamlMember(Alias = "primitive_objects_per_update")]
-	[Description("Emergency ceiling for adaptive primitive send work per player tick. Collidable primitives consume two work units.")]
-	public int PrimitiveObjectsPerUpdate { get; set; } = 20;
+	[Description("Emergency ceiling for adaptive primitive send work per player tick. Collidable primitives consume two work units; sustained throughput is controlled by the adaptive rate and pressure limits.")]
+	public int PrimitiveObjectsPerUpdate { get; set; } = 32;
 
 	[YamlMember(Alias = "primitive_global_objects_per_update")]
 	[Description("Emergency ceiling for adaptive primitive send work globally per tick. Sustained throughput is controlled automatically from frame time, RTT, and send queue pressure.")]
-	public int PrimitiveGlobalObjectsPerUpdate { get; set; } = 128;
+	public int PrimitiveGlobalObjectsPerUpdate { get; set; } = 256;
 
 	[YamlMember(Alias = "culling_global_objects_per_update")]
 	[Description("Maximum culling objects processed globally per update.")]
@@ -56,8 +56,60 @@ public class Config
 	public float CullingSpatialCellSize { get; set; } = 50f;
 
 	[YamlMember(Alias = "primitive_finalize_frame_budget_ms")]
-	[Description("Maximum time (in milliseconds) spent finalizing primitive optimization work in one frame.")]
-	public float PrimitiveFinalizeFrameBudgetMs { get; set; } = 2f;
+	[Description("Maximum time (in milliseconds) spent finalizing primitive optimization work in one frame. This is a main-thread budget, not a fixed object count.")]
+	public float PrimitiveFinalizeFrameBudgetMs { get; set; } = 5f;
+
+	[YamlMember(Alias = "primitive_finalize_adaptive_burst")]
+	[Description("Preferred number of primitive finalization items processed per round-robin burst. The frame-time budget remains the hard limit and bursts are reduced when several schematics are pending.")]
+	public int PrimitiveFinalizeAdaptiveBurst { get; set; } = 256;
+
+	[YamlMember(Alias = "primitive_initial_objects_per_second")]
+	[Description("Initial adaptive primitive send rate per ready client. The existing per-tick object ceiling still applies as an emergency cap.")]
+	public float PrimitiveInitialObjectsPerSecond { get; set; } = 600f;
+
+	[YamlMember(Alias = "primitive_initial_burst_objects")]
+	[Description("Startup object tokens granted when a ready client first enters the adaptive primitive sender. This is clamped by the per-tick emergency ceiling.")]
+	public int PrimitiveInitialBurstObjects { get; set; } = 64;
+
+	[YamlMember(Alias = "primitive_max_objects_per_second")]
+	[Description("Maximum adaptive primitive send rate per ready client before backpressure reduces it.")]
+	public float PrimitiveMaxObjectsPerSecond { get; set; } = 1000f;
+
+	[YamlMember(Alias = "primitive_global_initial_objects_per_second")]
+	[Description("Initial adaptive primitive send rate shared by all ready clients.")]
+	public float PrimitiveGlobalInitialObjectsPerSecond { get; set; } = 3000f;
+
+	[YamlMember(Alias = "primitive_global_max_objects_per_second")]
+	[Description("Maximum adaptive primitive send rate shared by all ready clients.")]
+	public float PrimitiveGlobalMaxObjectsPerSecond { get; set; } = 6000f;
+
+	[YamlMember(Alias = "primitive_byte_burst_bytes")]
+	[Description("Maximum per-client primitive byte tokens retained between ticks. It is automatically raised to at least the reliable batch hard limit.")]
+	public int PrimitiveByteBurstBytes { get; set; } = 128 * 1024;
+
+	[YamlMember(Alias = "primitive_global_byte_burst_bytes")]
+	[Description("Global primitive send byte burst shared by all ready clients.")]
+	public int PrimitiveGlobalByteBurstBytes { get; set; } = 1024 * 1024;
+
+	[YamlMember(Alias = "primitive_batch_soft_limit_bytes")]
+	[Description("Reliable batch byte pressure threshold at which adaptive primitive sends begin backing off.")]
+	public int PrimitiveBatchSoftLimitBytes { get; set; } = 32 * 1024;
+
+	[YamlMember(Alias = "primitive_batch_hard_limit_bytes")]
+	[Description("Reliable batch byte pressure threshold at which adaptive primitive sends pause until the queue drains.")]
+	public int PrimitiveBatchHardLimitBytes { get; set; } = 96 * 1024;
+
+	[YamlMember(Alias = "primitive_reliable_queue_soft_limit")]
+	[Description("Reliable packet queue depth at which adaptive primitive sends begin backing off.")]
+	public int PrimitiveReliableQueueSoftLimit { get; set; } = 24;
+
+	[YamlMember(Alias = "primitive_reliable_queue_hard_limit")]
+	[Description("Reliable packet queue depth at which adaptive primitive sends pause until the queue drains.")]
+	public int PrimitiveReliableQueueHardLimit { get; set; } = 72;
+
+	[YamlMember(Alias = "primitive_diagnostics_enabled")]
+	[Description("Logs a low-frequency primitive optimization/sender snapshot with fallback, pending, send, byte, pressure, and completion counters.")]
+	public bool PrimitiveDiagnosticsEnabled { get; set; } = false;
 
 	[YamlMember(Alias = "primitive_cluster_worker_count")]
 	[Description("Number of worker tasks used to build primitive clusters.")]
@@ -70,6 +122,10 @@ public class Config
 	[YamlMember(Alias = "primitive_assume_static_schematic_name_patterns")]
 	[Description("Schematic name patterns whose otherwise-unmarked primitives may be treated as static. Only use this for schematics that are never moved, animated, or visibility-controlled at runtime.")]
 	public List<string> PrimitiveAssumeStaticSchematicNamePatterns { get; set; } = [];
+
+	[YamlMember(Alias = "primitive_deactivate_noncollidable_assumed_static")]
+	[Description("Deactivates non-collidable optimized leaf primitive GameObjects in schematics matched by PrimitiveAssumeStaticSchematicNamePatterns after their client payload and cluster metadata are captured. Components and GameObjects are never destroyed; only explicitly optimized, originally active leaves are restored on native promotion/unload.")]
+	public bool PrimitiveDeactivateNoncollidableAssumedStatic { get; set; } = true;
 
 	[Description("Enables distance-based culling for TextToys. When enabled, large text images are only sent to players within CullingDistance.")]
 	public bool EnableCulling { get; set; } = true;

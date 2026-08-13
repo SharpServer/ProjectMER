@@ -73,7 +73,7 @@ public class SchematicObject : MonoBehaviour
                 return _attachedBlocks;
 
             _attachedBlocks.Clear();
-            foreach (Transform tf in GetComponentsInChildren<Transform>())
+            foreach (Transform tf in GetComponentsInChildren<Transform>(includeInactive: true))
             {
                 if (tf == transform)
                     continue;

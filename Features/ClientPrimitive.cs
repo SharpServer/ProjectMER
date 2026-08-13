@@ -17,6 +17,12 @@ public sealed class ClientPrimitive
     // Mirror's reliable channel accepts very large fragmented messages, but a vanilla client can
     // still stall while deserializing one. Oversized primitives remain native instead.
     private const int MaximumSafeSpawnMessageBytes = 24 * 1024;
+    // Cache the non-payload size from Mirror's canonical writer on the first primitive. The exact
+    // local generated SpawnMessage writer uses fixed-width fields; deriving instead of hardcoding
+    // keeps this optimization fail-soft across dependency updates. All calls occur on Unity's main
+    // thread, so these process-lifetime caches need no synchronization.
+    private static int _packedSpawnMessageOverhead = -1;
+    private static int _packedDestroyMessageSize = -1;
     private readonly SpawnMessage _spawnMessage;
     private readonly ObjectDestroyMessage _destroyMessage;
     private readonly Dictionary<int, NetworkConnectionToClient> _viewers = [];
@@ -150,21 +156,25 @@ public sealed class ClientPrimitive
             };
 
             ObjectDestroyMessage destroyMessage = new() { netId = netId };
-            using NetworkWriterPooled packedWriter = NetworkWriterPool.Get();
-            NetworkMessages.Pack(spawnMessage, packedWriter);
-            int spawnMessageSize = packedWriter.Position;
+            if (_packedSpawnMessageOverhead < 0 || _packedDestroyMessageSize < 0)
+            {
+                using NetworkWriterPooled packedWriter = NetworkWriterPool.Get();
+                NetworkMessages.Pack(spawnMessage, packedWriter);
+                _packedSpawnMessageOverhead = checked(packedWriter.Position - serialized.Count);
+                packedWriter.Position = 0;
+                NetworkMessages.Pack(destroyMessage, packedWriter);
+                _packedDestroyMessageSize = packedWriter.Position;
+            }
+
+            int spawnMessageSize = checked(_packedSpawnMessageOverhead + serialized.Count);
             if (spawnMessageSize > Math.Min(NetworkMessages.MaxMessageSize(0), MaximumSafeSpawnMessageBytes))
                 return false;
-
-            packedWriter.Position = 0;
-            NetworkMessages.Pack(destroyMessage, packedWriter);
-            int destroyMessageSize = packedWriter.Position;
 
             clientPrimitive = new ClientPrimitive(
                 spawnMessage,
                 spawnMessageSize,
                 destroyMessage,
-                destroyMessageSize,
+                _packedDestroyMessageSize,
                 owner,
                 primitive)
             {

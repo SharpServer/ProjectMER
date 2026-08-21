@@ -33,6 +33,20 @@
     </Reference>
   </ItemGroup>
 
+  <!--
+    Unity 版のコア アセンブリ。Windows では HintPath がそのまま採用されるが、
+    Linux の SDK は mscorlib だけを NuGet の net48 参照アセンブリへ差し替えてしまい、
+    「Unity 版 System/netstandard + .NET Framework 版 mscorlib」という
+    食い違った組み合わせになって CS1069 (Queue<> 等) で失敗する。
+    Windows のビルドを一切変えずに Linux でもビルドできるよう、Windows 限定にしている。
+    Linux では SDK 既定の net48 参照アセンブリが使われる。
+  -->
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <Reference Include="mscorlib" HintPath="$(SL_REFERENCES)\mscorlib.dll" Private="false" />
+    <Reference Include="System" HintPath="$(SL_REFERENCES)\System.dll" Private="false" />
+    <Reference Include="netstandard" HintPath="$(SL_REFERENCES)\netstandard.dll" Private="false" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="ExMod.Exiled" Version="9.14.2" />
     <PackageReference Include="Lib.Harmony" Version="2.3.6" />

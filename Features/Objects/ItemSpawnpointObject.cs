@@ -99,13 +99,14 @@ public class ItemSpawnpointObject : MonoBehaviour
 
 			if (!spec.AllowsVanilla)
 			{
-				Logger.Warn($"ItemSpawnpoint custom item '{spec.Name}' has no provider.");
+				Logger.Warn($"ItemSpawnpoint custom item \"{spec.Name}\" has no registered custom item provider. " +
+				            "Remove the \"(CItem)\" prefix to fall back to a vanilla ItemType.");
 				break;
 			}
 
-			if (!spec.TryGetItemType(Base.ItemType, out ItemType itemType))
+			if (!spec.TryGetItemType(Base.ItemType, out ItemType itemType) || itemType == ItemType.None)
 			{
-				Logger.Warn($"ItemSpawnpoint item '{spec.Name}' matched no custom item and is not a valid ItemType.");
+				Logger.Warn($"ItemSpawnpoint item {ItemSpawnSpec.DescribeUnknownItem(spec.Name)}");
 				break;
 			}
 

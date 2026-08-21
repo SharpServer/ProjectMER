@@ -1,7 +1,9 @@
 using AdminToys;
+using Interactables.Interobjects.DoorUtils;
 using InventorySystem.Items.Firearms.Attachments;
 using LabApi.Features.Wrappers;
 using MapGeneration.Distributors;
+using MEC;
 using Mirror;
 using ProjectMER.Events.Handlers.Internal;
 using ProjectMER.Features.Enums;
@@ -13,6 +15,7 @@ using PrimitiveObjectToy = AdminToys.PrimitiveObjectToy;
 using TextToy = AdminToys.TextToy;
 using WaypointToy = AdminToys.WaypointToy;
 using LabApiLocker = LabApi.Features.Wrappers.Locker;
+using LabApiLockerChamber = LabApi.Features.Wrappers.LockerChamber;
 
 namespace ProjectMER.Features.Serializable.Schematics;
 
@@ -60,6 +63,10 @@ public class SchematicBlockData
 			BlockType.Interactable => CreateInteractable(),
 			BlockType.Waypoint => CreateWaypoint(),
 			BlockType.Locker => CreateLocker(),
+			// Teleport ブロックの実体は <Name>-Teleports.json 側で生成されるため、
+			// ここでは階層を保つための空 GO だけを作る（警告は出さない）。
+			BlockType.Teleport => CreateEmpty(),
+			BlockType.Schematic => CreateEmpty(),
 			_ => CreateEmpty(true)
 		};
 
@@ -77,6 +84,15 @@ public class SchematicBlockData
 				BlockType.Empty when Scale == Vector3.zero => Vector3.one,
 				_ => localScale
 			};
+
+		// StructurePositionSync（ロッカー等の構造物）はクライアント側の設置位置を決めるため、
+		// ブロックの座標を適用したあとに書き込む必要がある。
+		// マップ配置ロッカー（SerializableLocker）も同じ順序で処理している。
+		if (gameObject.TryGetComponent(out StructurePositionSync structurePositionSync))
+		{
+			structurePositionSync.Network_position = transform.position;
+			structurePositionSync.Network_rotationY = (sbyte)Mathf.RoundToInt(transform.rotation.eulerAngles.y / 5.625f);
+		}
 
 		if (gameObject.TryGetComponent(out AdminToyBase adminToyBase))
 		{
@@ -220,16 +236,23 @@ public class SchematicBlockData
 				legacyCustomItem,
 				fallbackItemType,
 				uses,
-				locked: Properties.ContainsKey("Locked"),
+				locked: Properties.GetLegacyFlag("Locked"),
 				attachmentsCode,
 				triggerSpawn);
 
 			return placeholder;
 		}
 
-		Pickup pickup = Pickup.Create((ItemType)Convert.ToInt32(Properties["ItemType"]), Vector3.zero)!;
-		if (Properties.ContainsKey("Locked"))
-			PickupEventsHandler.ButtonPickups.Add(pickup.Serial, schematicObject);
+		ItemType pickupType = (ItemType)Properties.GetInt("ItemType", (int)ItemType.None);
+		if (pickupType == ItemType.None)
+		{
+			Logger.Warn($"Pickup block \"{Name}\" has no item assigned. Object will be an empty GameObject instead.");
+			return new("Empty Pickup");
+		}
+
+		Pickup pickup = Pickup.Create(pickupType, Vector3.zero)!;
+		if (Properties.GetLegacyFlag("Locked"))
+			PickupEventsHandler.ButtonPickups[pickup.Serial] = schematicObject;
 
 		return pickup.GameObject;
 	}
@@ -272,8 +295,12 @@ public class SchematicBlockData
 
 	private GameObject CreateLocker()
 	{
-		if (!Properties.TryGetValue("LockerType", out object lockerTypeObj))
+		if (!Properties.TryGetValueSafe("LockerType", out object lockerTypeObj))
 			return CreateEmpty(true);
+
+		float chance = Properties.GetFloat("Chance", 100f);
+		if (chance < 100f && UnityEngine.Random.Range(0f, 100f) > chance)
+			return new("Empty Locker");
 
 		LockerType lockerType = (LockerType)Convert.ToInt32(lockerTypeObj);
 
@@ -300,12 +327,144 @@ public class SchematicBlockData
 
 		MapGeneration.Distributors.Locker locker = GameObject.Instantiate(prefab);
 
-		if (locker.TryGetComponent(out StructurePositionSync structurePositionSync))
-		{
-			structurePositionSync.Network_position = locker.transform.position;
-			structurePositionSync.Network_rotationY = (sbyte)Mathf.RoundToInt(locker.transform.rotation.eulerAngles.y / 5.625f);
-		}
+		// StructurePositionSync の同期はブロック座標の適用後（Create 側）に行う
+		ConfigureLockerContents(locker);
 
 		return locker.gameObject;
+	}
+
+	/// <summary>
+	/// Unity 側 LockerComponent が書き出した Loot / Chambers / Items をロッカーへ適用する。
+	/// マップ配置ロッカー（<see cref="Lockers.SerializableLocker"/>）と同じ共通処理を使う。
+	/// </summary>
+	private void ConfigureLockerContents(MapGeneration.Distributors.Locker locker)
+	{
+		if (Properties.GetBool("InteractLock"))
+			LockerEventsHandler.RegisterInteractLock(locker);
+
+		List<string> items = Properties.GetStringList("Items");
+		IReadOnlyList<object> lootData = Properties.GetList("Loot");
+		IReadOnlyList<object> chamberData = Properties.GetList("Chambers");
+
+		if (items.Count == 0 && lootData.Count == 0 && chamberData.Count == 0)
+			return;
+
+		LabApiLocker labApiLocker = LabApiLocker.Get(locker);
+		bool useSimpleItems = items.Count > 0;
+
+		if (useSimpleItems)
+		{
+			// 簡易 Items 指定時はネイティブの初回抽選そのものを止める
+			labApiLocker.ClearLockerLoot();
+			locker._serverChambersFilled = true;
+		}
+		else if (lootData.Count > 0)
+		{
+			LockerConfigurator.ApplyLoot(labApiLocker, ParseLoot(lootData));
+		}
+
+		List<Lockers.SerializableLockerChamber> chambers = ParseChambers(chamberData);
+		if (chambers.Count > 0 || useSimpleItems)
+		{
+			labApiLocker.ClearAllChambers();
+
+			int index = 0;
+			foreach (LabApiLockerChamber chamber in labApiLocker.Chambers)
+			{
+				if (index < chambers.Count)
+				{
+					// エディタ側で受け入れアイテムが未設定なら、プレハブ既定値を残す
+					// （空配列で上書きすると何も入れられないロッカーになってしまう）
+					if (chambers[index].AcceptableItems.Count > 0)
+						chamber.AcceptableItems = chambers[index].AcceptableItems.ToArray();
+
+					chamber.RequiredPermissions = chambers[index].RequiredPermissions;
+				}
+
+				index++;
+			}
+		}
+
+		bool shuffleChambers = Properties.GetBool("ShuffleChambers", true);
+		int openedChambers = Properties.GetInt("OpenedChambers");
+
+		Timing.CallDelayed(0.25f, () =>
+		{
+			if (locker == null)
+				return;
+
+			if (useSimpleItems)
+				LockerConfigurator.FillItems(labApiLocker, items, shuffleChambers);
+
+			LockerConfigurator.UnfreezeContents(labApiLocker);
+
+			int index = 0;
+			foreach (LabApiLockerChamber chamber in labApiLocker.Chambers)
+			{
+				if (index < chambers.Count && chambers[index].IsOpen)
+					chamber.IsOpen = true;
+
+				index++;
+			}
+
+			LockerConfigurator.OpenRandomChambers(labApiLocker, openedChambers);
+		});
+	}
+
+	private static List<Lockers.SerializableLockerLoot> ParseLoot(IReadOnlyList<object> lootData)
+	{
+		List<Lockers.SerializableLockerLoot> loot = new(lootData.Count);
+
+		foreach (object element in lootData)
+		{
+			Dictionary<string, object>? entry = element.AsDictionary();
+			if (entry == null)
+				continue;
+
+			ItemType targetItem = (ItemType)entry.GetInt("TargetItem", (int)ItemType.None);
+			if (targetItem == ItemType.None)
+				continue;
+
+			loot.Add(new Lockers.SerializableLockerLoot(
+				targetItem,
+				Math.Max(1, entry.GetInt("RemainingUses", 1)),
+				Math.Max(1, entry.GetInt("MaxPerChamber", 1)),
+				Math.Max(0, entry.GetInt("ProbabilityPoints", 100)),
+				Math.Max(0, entry.GetInt("MinPerChamber", 1))));
+		}
+
+		return loot;
+	}
+
+	private static List<Lockers.SerializableLockerChamber> ParseChambers(IReadOnlyList<object> chamberData)
+	{
+		List<Lockers.SerializableLockerChamber> chambers = new(chamberData.Count);
+
+		foreach (object element in chamberData)
+		{
+			Dictionary<string, object>? entry = element.AsDictionary();
+			if (entry == null)
+				continue;
+
+			List<ItemType> acceptableItems = [];
+			foreach (object acceptableItem in entry.GetList("AcceptableItems"))
+			{
+				try
+				{
+					acceptableItems.Add((ItemType)Convert.ToInt32(acceptableItem));
+				}
+				catch
+				{
+					// 不正な要素は無視する
+				}
+			}
+
+			chambers.Add(new Lockers.SerializableLockerChamber(
+				acceptableItems.ToArray(),
+				entry.GetBool("IsOpen"),
+				(DoorPermissionFlags)entry.GetInt("RequiredPermissions")));
+		}
+
+		return chambers;
 	}
 }

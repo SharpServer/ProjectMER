@@ -115,13 +115,14 @@ public class SchematicPickupSpawner : MonoBehaviour
 
 		if (!_spec.AllowsVanilla)
 		{
-			Logger.Warn($"Schematic pickup '{_spec.Name}' has no custom item provider.");
+			Logger.Warn($"Schematic pickup \"{_spec.Name}\" has no registered custom item provider. " +
+			            "Remove the \"(CItem)\" prefix to fall back to a vanilla ItemType.");
 			return 0;
 		}
 
 		if (!_spec.TryGetItemType(_fallbackItemType, out ItemType itemType) || itemType == ItemType.None)
 		{
-			Logger.Warn($"Schematic pickup '{_spec.Name}' matched no custom item and is not a valid ItemType.");
+			Logger.Warn($"Schematic pickup {ItemSpawnSpec.DescribeUnknownItem(_spec.Name)}");
 			return 0;
 		}
 

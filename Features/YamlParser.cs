@@ -13,6 +13,7 @@ public static class YamlParser
 		.DisableAliases()
 		.IgnoreFields()
 		.WithTypeConverter(new VectorConverter())
+		.WithTypeConverter(new ItemTypeConverter())
 		.Build();
 
 
@@ -21,5 +22,6 @@ public static class YamlParser
 		.IgnoreUnmatchedProperties()
 		.IgnoreFields()
 		.WithTypeConverter(new VectorConverter())
+		.WithTypeConverter(new ItemTypeConverter())
 		.Build();
 }

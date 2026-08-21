@@ -43,6 +43,18 @@ public class SchematicBlock : MonoBehaviour
     /// <summary>ObjectPrefab 管理キーを持つか。</summary>
     public bool HasObjectPrefabKey => ObjectPrefabKey.Length > 0;
 
+    /// <summary>
+    /// Unity 側の ObjectPrefabSchematicInfo で割り当てられたタグ（未設定なら空）。
+    /// ObjectPrefab 側の挙動分岐（例: エレベーターボタンの Next / Back 判定）に使う。
+    /// </summary>
+    public string ObjectPrefabTag =>
+        Data.Properties != null && Data.Properties.TryGetValue("ObjectPrefabTag", out object tag)
+            ? tag?.ToString() ?? string.Empty
+            : string.Empty;
+
+    /// <summary>ObjectPrefab タグを持つか。</summary>
+    public bool HasObjectPrefabTag => ObjectPrefabTag.Length > 0;
+
     internal void Init(SchematicObject schematic, SchematicBlockData data)
     {
         Schematic = schematic;

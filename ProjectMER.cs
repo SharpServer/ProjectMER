@@ -42,6 +42,8 @@ public class ProjectMER : Plugin<Config>
 
 	public PickupEventsHandler PickupEventsHandler { get; } = new();
 
+	public LockerEventsHandler LockerEventsHandler { get; } = new();
+
 	public override void Enable()
 	{
 		Singleton = this;
@@ -74,6 +76,7 @@ public class ProjectMER : Plugin<Config>
 		CustomHandlersManager.RegisterEventsHandler(ToolGunEventsHandler);
 		CustomHandlersManager.RegisterEventsHandler(AcionOnEventHandlers);
 		CustomHandlersManager.RegisterEventsHandler(PickupEventsHandler);
+		CustomHandlersManager.RegisterEventsHandler(LockerEventsHandler);
 		PrimitiveOptimizationManager.Start();
 		CullingManager.Start();
 
@@ -123,6 +126,7 @@ public class ProjectMER : Plugin<Config>
 		CustomHandlersManager.UnregisterEventsHandler(ToolGunEventsHandler);
 		CustomHandlersManager.UnregisterEventsHandler(AcionOnEventHandlers);
 		CustomHandlersManager.UnregisterEventsHandler(PickupEventsHandler);
+		CustomHandlersManager.UnregisterEventsHandler(LockerEventsHandler);
 
 		_mapFileSystemWatcher?.Dispose();
 		Singleton = null!;

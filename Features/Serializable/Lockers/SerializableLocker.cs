@@ -5,6 +5,7 @@ using InventorySystem.Items.Pickups;
 using MapGeneration.Distributors;
 using MEC;
 using Mirror;
+using ProjectMER.Events.Handlers.Internal;
 using ProjectMER.Features.Enums;
 using ProjectMER.Features.Extensions;
 using UnityEngine;
@@ -41,6 +42,11 @@ public class SerializableLocker : SerializableObject
 	/// </summary>
 	public bool? Open { get; set; }
 
+	/// <summary>
+	/// true なら一度でも操作されたあとはロックされ、それ以降だれも開けられなくなる。
+	/// </summary>
+	public bool InteractLock { get; set; }
+
 	public override GameObject? SpawnOrUpdateObject(Room? room = null, GameObject? instance = null)
 	{
 		Locker locker = instance == null ? UnityEngine.Object.Instantiate(LockerPrefab) : instance.GetComponent<Locker>();
@@ -61,23 +67,25 @@ public class SerializableLocker : SerializableObject
 		if (LockerType != _prevType)
 			SetDefaultSettings(labApiLocker);
 
+		if (InteractLock)
+			LockerEventsHandler.RegisterInteractLock(locker);
+		else
+			LockerEventsHandler.UnregisterInteractLock(locker);
+
 		bool useSimpleItems = Items.Count > 0;
 
-		labApiLocker.ClearLockerLoot();
 		if (!useSimpleItems)
 		{
-			foreach (SerializableLockerLoot loot in Loot)
-			{
-				labApiLocker.AddLockerLoot(loot.TargetItem, loot.RemainingUses, loot.ProbabilityPoints, loot.MinPerChamber, loot.MaxPerChamber);
-			}
+			LockerConfigurator.ApplyLoot(labApiLocker, Loot);
 		}
 		else
 		{
 			// 簡易 Items 指定時はネイティブの初回抽選そのものを止める
+			labApiLocker.ClearLockerLoot();
 			locker._serverChambersFilled = true;
 		}
 
-		bool hasBulkPermissions = TryParsePermissions(Permissions, out DoorPermissionFlags bulkPermissions);
+		bool hasBulkPermissions = LockerConfigurator.TryParsePermissions(Permissions, out DoorPermissionFlags bulkPermissions);
 
 		int i = 0;
 		labApiLocker.ClearAllChambers();
@@ -105,96 +113,20 @@ public class SerializableLocker : SerializableObject
 				return;
 
 			if (useSimpleItems)
-				FillSimpleItems(labApiLocker);
+				LockerConfigurator.FillItems(labApiLocker, Items);
 
-			foreach (ItemPickupBase itemPickupBase in locker.GetComponentsInChildren<ItemPickupBase>())
-			{
-				if (itemPickupBase.TryGetComponent(out Rigidbody rigidbody))
-					rigidbody.isKinematic = false;
-			}
+			LockerConfigurator.UnfreezeContents(labApiLocker);
 
-			int i = 0;
+			int index = 0;
 			foreach (LapApiLockerChamber chamber in labApiLocker.Chambers)
 			{
-				bool isOpen = Open ?? (i <= Chambers.Count - 1 && Chambers[i].IsOpen);
+				bool isOpen = Open ?? (index <= Chambers.Count - 1 && Chambers[index].IsOpen);
 				chamber.IsOpen = isOpen;
-				i++;
+				index++;
 			}
 		});
 
 		return locker.gameObject;
-	}
-
-	/// <summary>
-	/// 統一書式の Items をチャンバーへ順番に振り分けて配置する。
-	/// bare 名は CItem（プロバイダ経由）優先 → ItemType。
-	/// </summary>
-	private void FillSimpleItems(LabApiLocker labApiLocker)
-	{
-		List<LapApiLockerChamber> chambers = labApiLocker.Chambers.ToList();
-		if (chambers.Count == 0)
-			return;
-
-		foreach (LapApiLockerChamber chamber in chambers)
-			chamber.RemoveAllItems();
-
-		for (int index = 0; index < Items.Count; index++)
-		{
-			LapApiLockerChamber chamber = chambers[index % chambers.Count];
-			ItemSpawnSpec spec = ItemSpawnSpec.Parse(Items[index], null);
-
-			if (spec.AllowsCustom && TrySpawnCustomItemInChamber(chamber, spec.Name))
-				continue;
-
-			if (!spec.AllowsVanilla)
-			{
-				Logger.Warn($"Locker item '{spec.Name}' has no custom item provider.");
-				continue;
-			}
-
-			if (!spec.TryGetItemType(ItemType.None, out ItemType itemType) || itemType == ItemType.None)
-			{
-				Logger.Warn($"Locker item '{Items[index]}' matched no custom item and is not a valid ItemType.");
-				continue;
-			}
-
-			chamber.Base.SpawnItem(itemType, 1);
-		}
-	}
-
-	private static bool TrySpawnCustomItemInChamber(LapApiLockerChamber chamber, string customItemName)
-	{
-		Transform spawnpoint = chamber.Base.Spawnpoint != null ? chamber.Base.Spawnpoint : chamber.Base.transform;
-		var syntheticSpawnpoint = new SerializableItemSpawnpoint();
-
-		if (!ItemSpawnpointCustomItemRegistry.TrySpawn(
-			    customItemName,
-			    syntheticSpawnpoint,
-			    spawnpoint.position,
-			    spawnpoint.rotation,
-			    spawnpoint,
-			    out ItemPickupBase? pickup) ||
-		    pickup == null)
-		{
-			return false;
-		}
-
-		// ネイティブと同じ「開けるまでロック」挙動に合わせる
-		if (!chamber.Base.WasEverOpened)
-		{
-			PickupSyncInfo info = pickup.Info;
-			info.Locked = true;
-			pickup.NetworkInfo = info;
-		}
-
-		chamber.Base.Content.Add(pickup);
-		return true;
-	}
-
-	private static bool TryParsePermissions(string permissions, out DoorPermissionFlags flags)
-	{
-		flags = DoorPermissionFlags.None;
-		return !string.IsNullOrWhiteSpace(permissions) && Enum.TryParse(permissions, true, out flags);
 	}
 
 	private void SetDefaultSettings(LabApiLocker labApiLocker)

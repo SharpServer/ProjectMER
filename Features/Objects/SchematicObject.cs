@@ -432,12 +432,26 @@ public class SchematicObject : MonoBehaviour
         if (string.IsNullOrEmpty(animatorName))
             return false;
 
-        Object? animatorObject = AssetBundle.GetAllLoadedAssetBundles()
-            .FirstOrDefault(x => x.mainAsset.name == animatorName)?
-            .LoadAllAssets()
-            .First(x => x is RuntimeAnimatorController);
+        // Unity 5 以降のアセットバンドルビルドシステムで焼いたバンドルは mainAsset を持たない (null) ため、
+        // かつては x.mainAsset.name で引き当てていたところを、中身を名前で直接探す方式に変更した。
+        RuntimeAnimatorController? foundController = null;
 
-        if (animatorObject is null)
+        foreach (AssetBundle bundle in AssetBundle.GetAllLoadedAssetBundles())
+        {
+            foreach (RuntimeAnimatorController controller in bundle.LoadAllAssets<RuntimeAnimatorController>())
+            {
+                if (controller.name != animatorName)
+                    continue;
+
+                foundController = controller;
+                break;
+            }
+
+            if (foundController is not null)
+                break;
+        }
+
+        if (foundController is null)
         {
             string path = Path.Combine(DirectoryPath, animatorName);
 
@@ -447,12 +461,20 @@ public class SchematicObject : MonoBehaviour
                 return false;
             }
 
-            animatorObject = AssetBundle.LoadFromFile(path)
-                .LoadAllAssets()
-                .First(x => x is RuntimeAnimatorController);
+            foreach (RuntimeAnimatorController controller in AssetBundle.LoadFromFile(path).LoadAllAssets<RuntimeAnimatorController>())
+            {
+                foundController = controller;
+                break;
+            }
+
+            if (foundController is null)
+            {
+                Logger.Warn($"{gameObject.name} block of schematic references the {animatorName} animator, but the bundle contains no RuntimeAnimatorController!");
+                return false;
+            }
         }
 
-        animatorController = (RuntimeAnimatorController)animatorObject;
+        animatorController = foundController;
         return true;
     }
 

@@ -288,7 +288,7 @@ public sealed class ClientPrimitive
         }
     }
 
-    private static float GetSizePriority(PrimitiveObjectToy primitive)
+    internal static float GetSizePriority(PrimitiveObjectToy primitive)
     {
         Vector3 scale = primitive.transform.lossyScale;
         return Math.Abs(scale.x) + Math.Abs(scale.y) + Math.Abs(scale.z);

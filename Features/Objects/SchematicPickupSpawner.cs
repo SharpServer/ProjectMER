@@ -12,7 +12,7 @@ namespace ProjectMER.Features.Objects;
 
 /// <summary>
 /// スキマティック内 Pickup ブロックのスポーナー。
-/// 統一 Item 指定（CItem 優先 → ItemType）と TriggerSpawn（プラグインからの出現制御）に対応する。
+/// 統一 Item 指定（カスタムアイテム優先 → ItemType）と TriggerSpawn（プラグインからの出現制御）に対応する。
 /// スキマティック配置完了後（Start）に自動スポーンする（IsTriggerSpawn の場合は保留）。
 /// </summary>
 public class SchematicPickupSpawner : MonoBehaviour
@@ -35,7 +35,7 @@ public class SchematicPickupSpawner : MonoBehaviour
 	public bool IsTriggerSpawn { get; set; }
 
 	/// <summary>
-	/// 統一書式のアイテム指定（bare 名 = CItem 優先 → ItemType、"(ItemType)X" / "(CItem)X"）。
+	/// 統一書式のアイテム指定（bare 名 = カスタムアイテム優先 → ItemType、"(ItemType)X" / "(CustomItem)X"）。
 	/// 変更すると次回 SpawnItems から反映される。
 	/// </summary>
 	public string Item
@@ -87,7 +87,7 @@ public class SchematicPickupSpawner : MonoBehaviour
 	}
 
 	/// <summary>
-	/// アイテムをスポーンする。CItem 優先 → ItemType の順で解決する。
+	/// アイテムをスポーンする。カスタムアイテム優先 → ItemType の順で解決する。
 	/// </summary>
 	/// <param name="clearExisting">true なら既存のスポーン済みアイテムを先に破棄する。</param>
 	/// <returns>スポーンできたアイテム数。</returns>
@@ -101,7 +101,7 @@ public class SchematicPickupSpawner : MonoBehaviour
 
 		if (_spec.AllowsCustom)
 		{
-			// ItemSpawnpoint と同じプロバイダ経由で CItem を解決する
+			// ItemSpawnpoint と同じプロバイダ経由でカスタムアイテムを解決する
 			var syntheticSpawnpoint = new SerializableItemSpawnpoint();
 			if (ItemSpawnpointCustomItemRegistry.TrySpawn(_spec.Name, syntheticSpawnpoint, position, rotation, transform, out ItemPickupBase? customPickup) &&
 			    customPickup != null)
@@ -116,7 +116,7 @@ public class SchematicPickupSpawner : MonoBehaviour
 		if (!_spec.AllowsVanilla)
 		{
 			Logger.Warn($"Schematic pickup \"{_spec.Name}\" has no registered custom item provider. " +
-			            "Remove the \"(CItem)\" prefix to fall back to a vanilla ItemType.");
+			            $"Remove the \"{ItemSpawnSpec.CustomPrefix}\" prefix to fall back to a vanilla ItemType.");
 			return 0;
 		}
 

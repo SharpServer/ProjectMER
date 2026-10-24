@@ -26,7 +26,7 @@ internal static class LockerConfigurator
 
 	/// <summary>
 	/// 統一書式の Items をチャンバーへ順番に振り分けて配置する。
-	/// bare 名は CItem（プロバイダ経由）優先 → ItemType。
+	/// bare 名はカスタムアイテム（プロバイダ経由）優先 → ItemType。
 	/// </summary>
 	/// <param name="locker">対象ロッカー。</param>
 	/// <param name="items">統一書式のアイテム指定リスト。</param>
@@ -38,7 +38,7 @@ internal static class LockerConfigurator
 			return;
 
 		foreach (LabApiLockerChamber chamber in chambers)
-			chamber.RemoveAllItems();
+			ClearChamber(chamber);
 
 		if (shuffleChambers)
 			Shuffle(chambers);
@@ -54,7 +54,7 @@ internal static class LockerConfigurator
 			if (!spec.AllowsVanilla)
 			{
 				Logger.Warn($"Locker item \"{spec.Name}\" has no registered custom item provider. " +
-				            "Remove the \"(CItem)\" prefix to fall back to a vanilla ItemType.");
+				            $"Remove the \"{ItemSpawnSpec.CustomPrefix}\" prefix to fall back to a vanilla ItemType.");
 				continue;
 			}
 
@@ -73,14 +73,23 @@ internal static class LockerConfigurator
 	/// </summary>
 	public static bool TrySpawnCustomItemInChamber(LabApiLockerChamber chamber, string customItemName)
 	{
-		Transform spawnpoint = chamber.Base.Spawnpoint != null ? chamber.Base.Spawnpoint : chamber.Base.transform;
+		string key = ItemSpawnSpec.Parse(customItemName, customItemName).Name;
+		if (chamber.Base.SpawnOnFirstChamberOpening && !chamber.Base.WasEverOpened && !chamber.Base.IsOpen)
+		{
+			LockerCustomItemQueue queue = chamber.Base.GetComponent<LockerCustomItemQueue>() ??
+				chamber.Base.gameObject.AddComponent<LockerCustomItemQueue>();
+			queue.Add(chamber, key);
+			return true;
+		}
+		ItemSpawnpointCustomItemRegistry.TryGetBaseType(key, out ItemType baseType);
+		chamber.Base.GetSpawnpoint(baseType, chamber.Base.Content.Count, out Vector3 position, out Quaternion rotation, out Transform spawnpoint);
 		var syntheticSpawnpoint = new SerializableItemSpawnpoint();
 
 		if (!ItemSpawnpointCustomItemRegistry.TrySpawn(
-			    customItemName,
+			    key,
 			    syntheticSpawnpoint,
-			    spawnpoint.position,
-			    spawnpoint.rotation,
+			    position,
+			    rotation,
 			    spawnpoint,
 			    out ItemPickupBase? pickup) ||
 		    pickup == null)
@@ -88,16 +97,65 @@ internal static class LockerConfigurator
 			return false;
 		}
 
-		// ネイティブと同じ「開けるまでロック」挙動に合わせる
-		if (!chamber.Base.WasEverOpened)
-		{
-			PickupSyncInfo info = pickup.Info;
-			info.Locked = true;
-			pickup.NetworkInfo = info;
-		}
+		// A provider without metadata may still choose an item-specific spawnpoint.
+		chamber.Base.GetSpawnpoint(pickup.Info.ItemId, chamber.Base.Content.Count, out position, out rotation, out spawnpoint);
+		pickup.transform.SetParent(spawnpoint, true);
+		pickup.transform.SetPositionAndRotation(position, rotation);
+		PickupSyncInfo info = pickup.Info;
+		info.Locked = !chamber.Base.WasEverOpened && !chamber.Base.IsOpen;
+		pickup.NetworkInfo = info;
 
 		chamber.Base.Content.Add(pickup);
 		return true;
+	}
+
+	private static void ClearChamber(LabApiLockerChamber chamber)
+	{
+		chamber.Base.GetComponent<LockerCustomItemQueue>()?.Clear();
+		chamber.RemoveAllItems();
+		chamber.Base.ToBeSpawned.Clear();
+	}
+
+	/// <summary>Use a mixed native/custom weighted table, preserving native chamber limits.</summary>
+	public static void FillMixedLoot(LabApiLocker locker, IReadOnlyList<SerializableLockerLoot> loot)
+	{
+		List<LabApiLockerChamber> chambers = locker.Chambers.ToList();
+		foreach (LabApiLockerChamber chamber in chambers) ClearChamber(chamber);
+		if (locker.Base.MinChambersToFill != 0 && locker.Base.MaxChambersToFill >= locker.Base.MinChambersToFill)
+		{
+			Shuffle(chambers);
+			int count = UnityEngine.Random.Range(locker.Base.MinChambersToFill, locker.Base.MaxChambersToFill + 1);
+			if (chambers.Count > count) chambers.RemoveRange(Math.Max(0, count), chambers.Count - Math.Max(0, count));
+		}
+		int[] remaining = loot.Select(entry => Math.Max(0, entry.RemainingUses)).ToArray();
+		foreach (LabApiLockerChamber chamber in chambers)
+		{
+			List<int> candidates = Enumerable.Range(0, loot.Count).Where(i => remaining[i] > 0 &&
+				(!string.IsNullOrWhiteSpace(loot[i].CustomItem) ||
+				 (loot[i].TargetItem != ItemType.None && (chamber.AcceptableItems.Length == 0 ||
+				  chamber.AcceptableItems.Contains(loot[i].TargetItem))))).ToList();
+			if (candidates.Count == 0) continue;
+			// Vanilla FillChamber includes ProbabilityPoints+1 tickets per candidate.
+			double roll = UnityEngine.Random.value * candidates.Sum(i => Math.Max(0, loot[i].ProbabilityPoints) + 1d);
+			int selected = candidates[candidates.Count - 1];
+			foreach (int candidate in candidates)
+			{
+				roll -= Math.Max(0, loot[candidate].ProbabilityPoints) + 1d;
+				if (roll < 0) { selected = candidate; break; }
+			}
+			SerializableLockerLoot entry = loot[selected];
+			int min = Math.Max(0, entry.MinPerChamber);
+			int max = Math.Max(min, entry.MaxPerChamber);
+			int amount = UnityEngine.Random.Range(min, max + 1);
+			if (!string.IsNullOrWhiteSpace(entry.CustomItem))
+			{
+				for (int i = 0; i < amount; i++)
+					if (!TrySpawnCustomItemInChamber(chamber, entry.CustomItem))
+						Logger.Warn($"Cannot spawn custom locker loot '{entry.CustomItem}'. Check the Slafight class name.");
+			}
+			else chamber.Base.SpawnItem(entry.TargetItem, amount);
+			remaining[selected]--;
+		}
 	}
 
 	/// <summary>
@@ -142,8 +200,16 @@ internal static class LockerConfigurator
 	/// <summary>ロッカー内の Pickup の Rigidbody を物理有効に戻す。</summary>
 	public static void UnfreezeContents(LabApiLocker locker)
 	{
-		foreach (ItemPickupBase itemPickupBase in locker.Base.GetComponentsInChildren<ItemPickupBase>())
+		foreach (LabApiLockerChamber chamber in locker.Chambers)
+		foreach (ItemPickupBase itemPickupBase in chamber.Base.Content)
 		{
+			if (itemPickupBase == null) continue;
+			if (chamber.Base.IsOpen || chamber.Base.WasEverOpened)
+			{
+				PickupSyncInfo info = itemPickupBase.Info;
+				info.Locked = false;
+				itemPickupBase.NetworkInfo = info;
+			}
 			if (itemPickupBase.TryGetComponent(out Rigidbody rigidbody))
 				rigidbody.isKinematic = false;
 		}

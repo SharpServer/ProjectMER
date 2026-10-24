@@ -8,6 +8,7 @@ using Mirror;
 using ProjectMER.Events.Handlers;
 using ProjectMER.Features;
 using ProjectMER.Features.Enums;
+using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Serializable;
 using ProjectMER.Features.Serializable.Schematics;
 using UnityEngine;
@@ -19,6 +20,18 @@ namespace ProjectMER.Features.Objects;
 
 public class SchematicObject : MonoBehaviour
 {
+    private readonly struct OriginalPrimitiveState
+    {
+        public OriginalPrimitiveState(Color color, PrimitiveFlags flags)
+        {
+            Color = color;
+            Flags = flags;
+        }
+
+        public Color Color { get; }
+        public PrimitiveFlags Flags { get; }
+    }
+
     /// <summary>
     /// Gets the schematic name.
     /// </summary>
@@ -122,6 +135,71 @@ public class SchematicObject : MonoBehaviour
     }
 
     public AnimationController AnimationController => AnimationController.Get(this);
+
+    /// <summary>
+    /// Gets whether the integrated MEROptimizer backend may convert this schematic's
+    /// static primitive leaves to client-side objects.
+    /// </summary>
+    public bool AllowPrimitiveOptimization { get; private set; } = true;
+
+    /// <summary>
+    /// Changes every primitive in this schematic to the specified color.
+    /// The first runtime state change promotes optimized primitives back to native
+    /// network objects so subsequent changes are synchronized reliably.
+    /// </summary>
+    public void SetColor(Color color)
+    {
+        PrepareForDynamicPrimitiveState();
+        ForEachPrimitive(primitive => primitive.NetworkMaterialColor = color);
+    }
+
+    /// <summary>Makes every primitive white and translucent for placement previews.</summary>
+    public void SetPreviewAppearance(float opacity = 0.35f) =>
+        SetColor(new Color(1f, 1f, 1f, Mathf.Clamp01(opacity)));
+
+    /// <summary>Changes only the opacity of every primitive while preserving its current RGB color.</summary>
+    public void SetOpacity(float opacity)
+    {
+        PrepareForDynamicPrimitiveState();
+        float clampedOpacity = Mathf.Clamp01(opacity);
+        ForEachPrimitive(primitive =>
+        {
+            Color color = primitive.NetworkMaterialColor;
+            color.a = clampedOpacity;
+            primitive.NetworkMaterialColor = color;
+        });
+    }
+
+    /// <summary>Enables or disables rendering for every primitive in this schematic.</summary>
+    public void SetVisible(bool visible)
+    {
+        PrepareForDynamicPrimitiveState();
+        SetPrimitiveFlag(PrimitiveFlags.Visible, visible);
+    }
+
+    /// <summary>Enables or disables collision for every primitive in this schematic.</summary>
+    public void SetCollidable(bool collidable)
+    {
+        PrepareForDynamicPrimitiveState();
+        SetPrimitiveFlag(PrimitiveFlags.Collidable, collidable);
+    }
+
+    /// <summary>
+    /// Restores the exported color, visibility and collision flags of every primitive.
+    /// This also restores schematics initially spawned with a preview color override.
+    /// </summary>
+    public void RestoreOriginalState()
+    {
+        PrepareForDynamicPrimitiveState();
+        foreach (KeyValuePair<PrimitiveObjectToy, OriginalPrimitiveState> pair in _originalPrimitiveStates)
+        {
+            if (pair.Key == null)
+                continue;
+
+            pair.Key.NetworkMaterialColor = pair.Value.Color;
+            pair.Key.NetworkPrimitiveFlags = pair.Value.Flags;
+        }
+    }
 
     /// <summary>
     /// このスキマティックを構成する全ブロック（SchematicBlockData 由来）。
@@ -231,10 +309,11 @@ public class SchematicObject : MonoBehaviour
     // Destroy 冪等化用
     private bool _isCleanedUp;
 
-    public SchematicObject Init(SchematicObjectDataList data)
+    public SchematicObject Init(SchematicObjectDataList data, SchematicSpawnOptions? options = null)
     {
         Name = Path.GetFileNameWithoutExtension(data.Path);
         DirectoryPath = data.Path;
+        AllowPrimitiveOptimization = options?.OptimizePrimitives ?? true;
 
         ObjectFromId = new Dictionary<int, Transform>(data.Blocks.Count + 1)
         {
@@ -242,7 +321,7 @@ public class SchematicObject : MonoBehaviour
         };
 
         var parentBlockIds = new HashSet<int>(data.Blocks.Select(block => block.ParentId));
-        CreateRecursiveFromID(data.RootObjectId, data.Blocks, transform, parentBlockIds);
+        CreateRecursiveFromID(data.RootObjectId, data.Blocks, transform, parentBlockIds, options);
 
         AddRigidbodies();
         AddTeleports();
@@ -263,10 +342,15 @@ public class SchematicObject : MonoBehaviour
     /// スキマティック（例: PersonnelOfficeZone は34080ブロック）が単一フレームで
     /// メインスレッドを長時間占有するのを避ける。
     /// </summary>
-    public IEnumerator<float> InitStaggered(SchematicObjectDataList data, float frameBudgetMs, Action<SchematicObject>? onComplete = null)
+    public IEnumerator<float> InitStaggered(
+        SchematicObjectDataList data,
+        float frameBudgetMs,
+        Action<SchematicObject>? onComplete = null,
+        SchematicSpawnOptions? options = null)
     {
         Name = Path.GetFileNameWithoutExtension(data.Path);
         DirectoryPath = data.Path;
+        AllowPrimitiveOptimization = options?.OptimizePrimitives ?? true;
 
         ObjectFromId = new Dictionary<int, Transform>(data.Blocks.Count + 1)
         {
@@ -284,7 +368,7 @@ public class SchematicObject : MonoBehaviour
         foreach (SchematicBlockData block in creationOrder)
         {
             Transform parentTransform = ObjectFromId.TryGetValue(block.ParentId, out Transform parentTf) ? parentTf : transform;
-            CreateObject(block, parentTransform, !parentBlockIds.Contains(block.ObjectId));
+            CreateObject(block, parentTransform, !parentBlockIds.Contains(block.ObjectId), options);
 
             if (stopwatch.Elapsed.TotalMilliseconds >= frameBudgetMs)
             {
@@ -311,13 +395,15 @@ public class SchematicObject : MonoBehaviour
         int id,
         List<SchematicBlockData> blocks,
         Transform parentGameObject,
-        HashSet<int> parentBlockIds)
+        HashSet<int> parentBlockIds,
+        SchematicSpawnOptions? options)
     {
         SchematicBlockData self = blocks.Find(c => c.ObjectId == id);
         Transform childGameObjectTransform = CreateObject(
             self,
             parentGameObject,
-            self != null && !parentBlockIds.Contains(self.ObjectId)) ?? transform;
+            self != null && !parentBlockIds.Contains(self.ObjectId),
+            options) ?? transform;
         int[] parentSchematics = blocks.Where(bl => bl.BlockType == BlockType.Schematic).Select(bl => bl.ObjectId).ToArray();
 
         foreach (SchematicBlockData block in blocks.FindAll(c => c.ParentId == id))
@@ -325,7 +411,7 @@ public class SchematicObject : MonoBehaviour
             if (parentSchematics.Contains(block.ParentId))
                 continue;
 
-            CreateRecursiveFromID(block.ObjectId, blocks, childGameObjectTransform, parentBlockIds);
+            CreateRecursiveFromID(block.ObjectId, blocks, childGameObjectTransform, parentBlockIds, options);
         }
     }
 
@@ -384,12 +470,28 @@ public class SchematicObject : MonoBehaviour
         return result;
     }
 
-    private Transform? CreateObject(SchematicBlockData block, Transform parentTransform, bool isLeaf)
+    private Transform? CreateObject(
+        SchematicBlockData block,
+        Transform parentTransform,
+        bool isLeaf,
+        SchematicSpawnOptions? options)
     {
         if (block == null)
             return null;
 
-        GameObject gameObject = block.Create(this, parentTransform, isLeaf);
+        GameObject gameObject = block.Create(this, parentTransform, isLeaf, options?.PrimitiveColorOverride);
+
+        if (block.BlockType == BlockType.Primitive &&
+            gameObject.TryGetComponent(out PrimitiveObjectToy originalPrimitive))
+        {
+            Color originalColor = block.Properties != null &&
+                block.Properties.TryGetValue("Color", out object colorValue)
+                    ? colorValue.ToString().GetColorFromString()
+                    : originalPrimitive.NetworkMaterialColor;
+            _originalPrimitiveStates[originalPrimitive] = new OriginalPrimitiveState(
+                originalColor,
+                originalPrimitive.NetworkPrimitiveFlags);
+        }
 
         // Attach metadata before primitive eligibility is checked. ObjectPrefab-managed blocks and
         // the precomputed leaf flag must be known before deciding to suppress native NetworkSpawn.
@@ -463,13 +565,17 @@ public class SchematicObject : MonoBehaviour
 
             foreach (RuntimeAnimatorController controller in AssetBundle.LoadFromFile(path).LoadAllAssets<RuntimeAnimatorController>())
             {
+                // Override-controller bundles also contain their base controller.
+                // Load the exact controller selected during schematic authoring.
+                if (controller.name != animatorName)
+                    continue;
                 foundController = controller;
                 break;
             }
 
             if (foundController is null)
             {
-                Logger.Warn($"{gameObject.name} block of schematic references the {animatorName} animator, but the bundle contains no RuntimeAnimatorController!");
+                Logger.Warn($"{gameObject.name} block of schematic references the {animatorName} animator, but the bundle contains no RuntimeAnimatorController with that name!");
                 return false;
             }
         }
@@ -567,6 +673,15 @@ public class SchematicObject : MonoBehaviour
 
         foreach (SchematicObjectPrefabData objectPrefabData in objectPrefabDataList)
         {
+            // A component attached to an exported block controls that block itself.
+            // Keep its children and ObjectFromId identity instead of making a duplicate root.
+            if (ObjectFromId.TryGetValue(objectPrefabData.ObjectId, out Transform existing))
+            {
+                SchematicObjectPrefabObject attached = existing.gameObject.AddComponent<SchematicObjectPrefabObject>();
+                attached.Init(objectPrefabData, this);
+                continue;
+            }
+
             GameObject objectPrefabGo = new GameObject(objectPrefabData.Name);
 
             Transform parentTransform = ObjectFromId.TryGetValue(objectPrefabData.ParentId, out Transform parentTf)
@@ -707,6 +822,33 @@ public class SchematicObject : MonoBehaviour
             DestroyInternal();
     }
 
+    private void PrepareForDynamicPrimitiveState()
+    {
+        if (_usesDynamicPrimitiveState)
+            return;
+
+        PrimitiveOptimizationManager.PromoteSchematic(this);
+        _usesDynamicPrimitiveState = true;
+    }
+
+    private void SetPrimitiveFlag(PrimitiveFlags flag, bool enabled)
+    {
+        ForEachPrimitive(primitive =>
+        {
+            PrimitiveFlags flags = primitive.NetworkPrimitiveFlags;
+            primitive.NetworkPrimitiveFlags = enabled ? flags | flag : flags & ~flag;
+        });
+    }
+
+    private void ForEachPrimitive(Action<PrimitiveObjectToy> action)
+    {
+        foreach (PrimitiveObjectToy primitive in _originalPrimitiveStates.Keys.ToArray())
+        {
+            if (primitive != null)
+                action(primitive);
+        }
+    }
+
     internal Dictionary<int, Transform> ObjectFromId = [];
 
     private readonly List<SchematicBlock> _blocks = [];
@@ -714,4 +856,6 @@ public class SchematicObject : MonoBehaviour
     private readonly List<NetworkIdentity> _networkIdentities = [];
     private readonly List<AdminToyBase> _adminToyBases = [];
     private readonly Dictionary<GameObject, RuntimeAnimatorController> _animators = [];
+    private readonly Dictionary<PrimitiveObjectToy, OriginalPrimitiveState> _originalPrimitiveStates = [];
+    private bool _usesDynamicPrimitiveState;
 }

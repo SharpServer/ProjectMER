@@ -15,8 +15,13 @@ public static class ObjectSpawner
 	}
 
 	public static SchematicObject SpawnSchematic(SerializableSchematic serializableSchematic)
+		=> SpawnSchematic(serializableSchematic, null);
+
+	public static SchematicObject SpawnSchematic(
+		SerializableSchematic serializableSchematic,
+		SchematicSpawnOptions? options)
 	{
-		GameObject? gameObject = serializableSchematic.SpawnOrUpdateObject();
+		GameObject? gameObject = serializableSchematic.SpawnOrUpdateObject(null, null, options);
 		if (gameObject == null)
 			return null!;
 
@@ -38,11 +43,45 @@ public static class ObjectSpawner
 	public static SchematicObject SpawnSchematic(string schematicName, Vector3 position, Vector3 eulerAngles, Vector3 scale) =>
 		SpawnSchematic(new() { SchematicName = schematicName, Position = position, Rotation = eulerAngles, Scale = scale });
 
+	/// <summary>
+	/// Spawns a schematic whose visible primitives are white and translucent.
+	/// Intended for placement previews. Collision and scripted behavior are unchanged.
+	/// </summary>
+	public static SchematicObject SpawnSchematicPreview(
+		string schematicName,
+		Vector3 position,
+		Quaternion rotation,
+		Vector3 scale,
+		float opacity = 0.35f) =>
+		SpawnSchematic(
+			new SerializableSchematic
+			{
+				SchematicName = schematicName,
+				Position = position,
+				Rotation = rotation.eulerAngles,
+				Scale = scale,
+			},
+			SchematicSpawnOptions.WhitePreview(opacity));
+
+	/// <summary>
+	/// Spawns a schematic whose visible primitives are white and translucent.
+	/// </summary>
+	public static SchematicObject SpawnSchematicPreview(
+		SerializableSchematic serializableSchematic,
+		float opacity = 0.35f) =>
+		SpawnSchematic(serializableSchematic, SchematicSpawnOptions.WhitePreview(opacity));
+
 	public static bool TrySpawnSchematic(SerializableSchematic serializableSchematic, out SchematicObject schematic)
+		=> TrySpawnSchematic(serializableSchematic, null, out schematic);
+
+	public static bool TrySpawnSchematic(
+		SerializableSchematic serializableSchematic,
+		SchematicSpawnOptions? options,
+		out SchematicObject schematic)
 	{
 		try
 		{
-			schematic = SpawnSchematic(serializableSchematic);
+			schematic = SpawnSchematic(serializableSchematic, options);
 			return schematic != null;
 		}
 		catch (Exception)

@@ -21,16 +21,22 @@ public delegate bool ItemSpawnpointCustomItemGiver(
 	ItemPickupBase pickup,
 	Player player);
 
+public delegate bool CustomItemTypeResolver(string customItemKey, out ItemType baseType);
+
 public static class ItemSpawnpointCustomItemRegistry
 {
 	private static readonly List<Provider> Providers = [];
 
 	public static void Register(ItemSpawnpointCustomItemSpawner spawner, ItemSpawnpointCustomItemGiver giver)
+		=> Register(spawner, giver, null);
+
+	public static void Register(ItemSpawnpointCustomItemSpawner spawner, ItemSpawnpointCustomItemGiver giver,
+		CustomItemTypeResolver? typeResolver)
 	{
 		if (Providers.Any(provider => provider.Spawner == spawner && provider.Giver == giver))
 			return;
 
-		Providers.Add(new Provider(spawner, giver));
+		Providers.Add(new Provider(spawner, giver, typeResolver));
 	}
 
 	public static void Unregister(ItemSpawnpointCustomItemSpawner spawner, ItemSpawnpointCustomItemGiver giver)
@@ -66,6 +72,20 @@ public static class ItemSpawnpointCustomItemRegistry
 		return false;
 	}
 
+	public static bool TryGetBaseType(string key, out ItemType baseType)
+	{
+		baseType = ItemType.None;
+		foreach (Provider provider in Providers.ToList())
+		{
+			try
+			{
+				if (provider.TypeResolver != null && provider.TypeResolver(key, out baseType)) return true;
+			}
+			catch (Exception exception) { Logger.Warn($"Custom item metadata for '{key}' failed: {exception}"); }
+		}
+		return false;
+	}
+
 	public static bool TryGive(string customItemKey, ItemPickupBase pickup, Player player)
 	{
 		if (string.IsNullOrWhiteSpace(customItemKey))
@@ -87,10 +107,13 @@ public static class ItemSpawnpointCustomItemRegistry
 		return false;
 	}
 
-	private readonly struct Provider(ItemSpawnpointCustomItemSpawner spawner, ItemSpawnpointCustomItemGiver giver)
+	private readonly struct Provider(ItemSpawnpointCustomItemSpawner spawner, ItemSpawnpointCustomItemGiver giver,
+		CustomItemTypeResolver? typeResolver)
 	{
 		public ItemSpawnpointCustomItemSpawner Spawner { get; } = spawner;
 
 		public ItemSpawnpointCustomItemGiver Giver { get; } = giver;
+
+		public CustomItemTypeResolver? TypeResolver { get; } = typeResolver;
 	}
 }

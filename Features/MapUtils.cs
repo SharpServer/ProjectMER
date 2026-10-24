@@ -127,6 +127,27 @@ public static class MapUtils
 	private static List<string> GetPrioritySchematicNames()
 		=> ProjectMER.Singleton?.Config?.PrioritySchematics ?? [];
 
+	/// <summary>
+	/// Clears map bookkeeping at a round boundary without destroying scene objects.
+	/// The server owns the scene teardown during a round restart; ProjectMER only
+	/// needs to stop pending work and forget references from the previous round.
+	/// </summary>
+	public static void ResetRoundState()
+	{
+		foreach (CoroutineHandle staggeredHandle in StaggeredLoads.Values.ToArray())
+		{
+			if (staggeredHandle.IsRunning)
+				Timing.KillCoroutines(staggeredHandle);
+		}
+
+		StaggeredLoads.Clear();
+
+		foreach (MapSchematic map in LoadedMaps.Values)
+			map.SpawnedObjects.Clear();
+
+		LoadedMaps.Clear();
+	}
+
 	public static bool UnloadMap(string mapName)
 	{
 		if (StaggeredLoads.TryGetValue(mapName, out CoroutineHandle staggeredHandle))
@@ -139,7 +160,10 @@ public static class MapUtils
 			return false;
 
 		foreach (MapEditorObject mapEditorObject in LoadedMaps[mapName].SpawnedObjects)
-			mapEditorObject.Destroy();
+		{
+			if (mapEditorObject != null)
+				mapEditorObject.Destroy();
+		}
 
 		LoadedMaps.Remove(mapName);
 		return true;

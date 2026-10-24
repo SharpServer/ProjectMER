@@ -27,7 +27,7 @@ public class SerializableLocker : SerializableObject
 	/// <summary>
 	/// 簡易アイテム設定（統一書式）。指定するとネイティブの Loot 抽選は無効になり、
 	/// リストの順にチャンバーへ振り分けて配置される。
-	/// 例: ["Medkit", "(CItem)MasterCard", "(ItemType)Adrenaline"]
+	/// 例: ["Medkit", "(CustomItem)MasterCard", "(ItemType)Adrenaline"]
 	/// </summary>
 	public List<string> Items { get; set; } = [];
 
@@ -59,13 +59,12 @@ public class SerializableLocker : SerializableObject
 
 		if (locker.TryGetComponent(out StructurePositionSync structurePositionSync))
 		{
-			structurePositionSync.Network_position = locker.transform.position;
-			structurePositionSync.Network_rotationY = (sbyte)Mathf.RoundToInt(locker.transform.rotation.eulerAngles.y / 5.625f);
+			StructureTransformSync.Attach(structurePositionSync);
 		}
 
 		LabApiLocker labApiLocker = LabApiLocker.Get(locker);
 		if (LockerType != _prevType)
-			SetDefaultSettings(labApiLocker);
+			SetDefaultSettings(labApiLocker, preserveConfigured: _prevType == LockerType.None);
 
 		if (InteractLock)
 			LockerEventsHandler.RegisterInteractLock(locker);
@@ -73,8 +72,9 @@ public class SerializableLocker : SerializableObject
 			LockerEventsHandler.UnregisterInteractLock(locker);
 
 		bool useSimpleItems = Items.Count > 0;
+		bool useMixedLoot = !useSimpleItems && Loot.Any(entry => !string.IsNullOrWhiteSpace(entry.CustomItem));
 
-		if (!useSimpleItems)
+		if (!useSimpleItems && !useMixedLoot)
 		{
 			LockerConfigurator.ApplyLoot(labApiLocker, Loot);
 		}
@@ -114,6 +114,8 @@ public class SerializableLocker : SerializableObject
 
 			if (useSimpleItems)
 				LockerConfigurator.FillItems(labApiLocker, Items);
+			else if (useMixedLoot)
+				LockerConfigurator.FillMixedLoot(labApiLocker, Loot);
 
 			LockerConfigurator.UnfreezeContents(labApiLocker);
 
@@ -129,19 +131,21 @@ public class SerializableLocker : SerializableObject
 		return locker.gameObject;
 	}
 
-	private void SetDefaultSettings(LabApiLocker labApiLocker)
+	private void SetDefaultSettings(LabApiLocker labApiLocker, bool preserveConfigured)
 	{
-		Loot.Clear();
-		Chambers.Clear();
-
-		foreach (LockerLoot loot in labApiLocker.Loot)
+		// Initial map loading must retain authored custom tables and permissions.
+		if (!preserveConfigured || Loot.Count == 0)
 		{
-			Loot.Add(new SerializableLockerLoot(loot.TargetItem, loot.RemainingUses, loot.MaxPerChamber, loot.ProbabilityPoints, loot.MinPerChamber));
+			Loot.Clear();
+			foreach (LockerLoot loot in labApiLocker.Loot)
+				Loot.Add(new SerializableLockerLoot(loot.TargetItem, loot.RemainingUses, loot.MaxPerChamber, loot.ProbabilityPoints, loot.MinPerChamber));
 		}
 
-		foreach (LapApiLockerChamber chamber in labApiLocker.Chambers)
+		if (!preserveConfigured || Chambers.Count == 0)
 		{
-			Chambers.Add(new SerializableLockerChamber(chamber.AcceptableItems, chamber.IsOpen, chamber.RequiredPermissions));
+			Chambers.Clear();
+			foreach (LapApiLockerChamber chamber in labApiLocker.Chambers)
+				Chambers.Add(new SerializableLockerChamber(chamber.AcceptableItems, chamber.IsOpen, chamber.RequiredPermissions));
 		}
 	}
 

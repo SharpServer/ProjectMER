@@ -15,13 +15,13 @@ using UnityEngine;
 namespace ProjectMER.Features;
 
 /// <summary>
-/// Defers static schematic primitives and replaces their per-client network objects with compact,
-/// culling-aware spawn messages. All Unity/Mirror work remains on the main thread; only immutable
-/// cluster coordinates are processed by worker tasks.
+/// ProjectMER-integrated MEROptimizer backend. Eligible schematic primitives become compact
+/// client-side spawn records, large/excluded primitives remain always visible, and the rest are
+/// grouped with MEROptimizer's proximity-cluster model. Unity/Mirror work remains on the main
+/// thread; only immutable cluster coordinates are processed by worker tasks.
 /// </summary>
 public static class PrimitiveOptimizationManager
 {
-    private const int MaxAlwaysVisiblePrimitivesPerSchematic = 16;
     private const int ConstructionFlushSize = 256;
     private const int NativeRestoreQuantum = 64;
     private const int FinalizationCommitChunkSize = 512;
@@ -217,15 +217,14 @@ public static class PrimitiveOptimizationManager
     internal static bool TryDefer(SchematicObject owner, PrimitiveObjectToy primitive, bool isLeaf)
     {
         if (!IsMainThread() || owner == null || primitive == null || !NetworkServer.active || !IsEnabled ||
-            !isLeaf || !IsStaticCandidate(owner, primitive))
+            !owner.AllowPrimitiveOptimization || !isLeaf || !IsStaticCandidate(owner, primitive))
             return false;
 
-        bool assumedStatic = IsAssumedStatic(owner);
-        // A collidable primitive that is not covered by the explicit immutable-schematic promise
-        // must exist on the client immediately. Otherwise the server collider catches a player
-        // while the client repeatedly predicts a fall through an as-yet unsent floor.
-        if (primitive.PrimitiveFlags.HasFlag(PrimitiveFlags.Collidable) && !assumedStatic)
+        if (CurrentConfig?.PrimitiveOptimizeOnlyNonCollidable == true &&
+            primitive.PrimitiveFlags.HasFlag(PrimitiveFlags.Collidable))
+        {
             return false;
+        }
 
         if (!Pending.TryGetValue(owner, out List<PrimitiveObjectToy>? primitives))
             Pending[owner] = primitives = [];
@@ -235,7 +234,7 @@ public static class PrimitiveOptimizationManager
         // Explicitly assumed-static schematics may be finalized while they are still being built.
         // This overlaps main-thread payload creation, worker clustering and network delivery with
         // the remaining construction instead of leaving clients with no clusters for several minutes.
-        if (assumedStatic && primitives.Count >= ConstructionFlushSize)
+        if (primitives.Count >= ConstructionFlushSize)
         {
             List<PrimitiveObjectToy> batch = primitives.ToList();
             primitives.Clear();
@@ -292,6 +291,12 @@ public static class PrimitiveOptimizationManager
         // Plugin assemblies are all loaded before LabAPI enables ProjectMER. Cache this once instead
         // of scanning the complete AppDomain for every primitive in a large schematic.
         _externalMeroOptimizerLoaded = DetectExternalMeroOptimizer();
+        if (_externalMeroOptimizerLoaded && CurrentConfig?.EnablePrimitiveOptimization == true)
+        {
+            Logger.Warn(
+                "ProjectMER's integrated MEROptimizer backend is disabled because the standalone " +
+                "MEROptimizer assembly is loaded. Remove MEROptimizerLabAPI.dll and restart the server.");
+        }
         _lifecycleCancellation = new CancellationTokenSource();
         int workerCount = Math.Max(1, CurrentConfig?.PrimitiveClusterWorkerCount ?? 1);
         _clusterWorkers = new SemaphoreSlim(workerCount, workerCount);
@@ -404,6 +409,82 @@ public static class PrimitiveOptimizationManager
         Owners.Remove(owner);
 
         RemoveClusterJobs(owner);
+    }
+
+    /// <summary>
+    /// Restores every deferred or optimized primitive owned by a schematic to native Mirror
+    /// objects and permanently excludes that schematic from primitive optimization. Call this
+    /// before changing synchronized primitive state at runtime.
+    /// </summary>
+    public static bool PromoteSchematic(SchematicObject owner)
+    {
+        if (owner == null || (_mainThreadId != 0 && !IsMainThread()))
+            return false;
+
+        ExcludedOwners[owner] = true;
+        ExcludedPrimitiveNames.Remove(owner);
+        StaticHierarchySafety.Remove(owner);
+        AssumedStaticOwners.Remove(owner);
+
+        var restored = new HashSet<PrimitiveObjectToy>();
+
+        if (Pending.TryGetValue(owner, out List<PrimitiveObjectToy>? pending))
+        {
+            Pending.Remove(owner);
+            foreach (PrimitiveObjectToy primitive in pending)
+            {
+                if (primitive != null && restored.Add(primitive))
+                    SpawnNative(primitive);
+            }
+        }
+
+        foreach (FinalizeWork work in FinalizationQueue.Where(work => work.Owner == owner).ToArray())
+        {
+            work.Invalidated = true;
+            foreach (OptimizedPrimitive item in work.Optimized)
+                RestoreDynamicPrimitive(item, restored);
+
+            for (int i = work.Index; i < work.Candidates.Count; i++)
+            {
+                PrimitiveObjectToy primitive = work.Candidates[i];
+                if (primitive != null && restored.Add(primitive))
+                    SpawnNative(primitive);
+            }
+        }
+
+        if (Owners.TryGetValue(owner, out OwnerState? state))
+        {
+            state.Generation++;
+            foreach (OptimizedPrimitive item in state.Items)
+                RestoreDynamicPrimitive(item, restored);
+            state.Items.Clear();
+            Owners.Remove(owner);
+        }
+
+        for (int i = ClusterJobs.Count - 1; i >= 0; i--)
+        {
+            ClusterJob job = ClusterJobs[i];
+            if (job.Owner != owner)
+                continue;
+
+            foreach (OptimizedPrimitive item in job.Items)
+                RestoreDynamicPrimitive(item, restored);
+            ClusterJobs.RemoveAt(i);
+        }
+
+        return true;
+    }
+
+    private static void RestoreDynamicPrimitive(
+        OptimizedPrimitive item,
+        HashSet<PrimitiveObjectToy> restored)
+    {
+        if (item.Primitive == null || !restored.Add(item.Primitive))
+            return;
+
+        CullingManager.UnregisterClientPrimitive(item.Client);
+        item.Client.Invalidate();
+        RestoreNative(item, spawn: NetworkServer.active);
     }
 
     private static void RemoveClusterJobs(SchematicObject owner)
@@ -593,7 +674,7 @@ public static class PrimitiveOptimizationManager
             primitive._collider.enabled = client.IsCollidable;
         primitive.transform.hasChanged = false;
         if (!client.IsCollidable && optimized.WasActiveSelf && IsLocallyStatic(primitive.transform) &&
-            IsAssumedStatic(work.Owner) && CurrentConfig?.PrimitiveDeactivateNoncollidableAssumedStatic == true)
+            CurrentConfig?.PrimitiveDeactivateNoncollidableAssumedStatic == true)
         {
             // Capture all Unity/Mirror state before deactivation. No hierarchy/component lookup is
             // performed after this call; explicit schematic metadata remains the source of truth.
@@ -657,7 +738,9 @@ public static class PrimitiveOptimizationManager
             new PackedVector3(worldPosition),
             new PackedVector3(ownerLocalPosition),
             halfDiagonal,
-            item.Client.SizePriority,
+            IsAlwaysVisible(primitive)
+                ? float.PositiveInfinity
+                : item.Client.SizePriority,
             item.Client.IsCollidable);
     }
 
@@ -703,32 +786,47 @@ public static class PrimitiveOptimizationManager
                 clustered.Add(input);
         }
 
-        // Sending every large primitive to every client defeats culling and can stall vanilla
-        // clients while they instantiate thousands of objects. Preserve the option for small
-        // structural schematics, but fold large sets back into spatial clusters.
-        if (alwaysVisible.Count > MaxAlwaysVisiblePrimitivesPerSchematic)
-        {
-            clustered.AddRange(alwaysVisible);
-            alwaysVisible.Clear();
-        }
-
-        if (alwaysVisible.Count > 0)
-            clusters.Add(CreateCluster(alwaysVisible, alwaysVisible: true));
-
-        var cells = clustered.GroupBy(input => (
-            FloorToInt(input.WorldPosition.X / settings.CellSize),
-            FloorToInt(input.WorldPosition.Y / settings.CellSize),
-            FloorToInt(input.WorldPosition.Z / settings.CellSize)));
-        foreach (IGrouping<(int, int, int), ClusterInput> cell in cells)
+        // MEROptimizer keeps large and explicitly excluded-from-distance primitives globally
+        // visible. Split them into bounded batches so one transition cannot create an oversized
+        // reliable-message burst.
+        for (int offset = 0; offset < alwaysVisible.Count; offset += settings.MaxPerCluster)
         {
             token.ThrowIfCancellationRequested();
-            List<ClusterInput> ordered = cell
-                .OrderByDescending(input => input.IsCollidable)
-                .ThenByDescending(input => input.SizePriority)
+            clusters.Add(CreateCluster(
+                alwaysVisible.Skip(offset).Take(settings.MaxPerCluster).ToList(),
+                alwaysVisible: true));
+        }
+
+        if (clustered.Count > 0)
+        {
+            float centerX = clustered.Average(input => input.WorldPosition.X);
+            float centerY = clustered.Average(input => input.WorldPosition.Y);
+            float centerZ = clustered.Average(input => input.WorldPosition.Z);
+            clustered = clustered
+                .OrderBy(input => DistanceSquared(input.WorldPosition, centerX, centerY, centerZ))
                 .ThenBy(input => input.Index)
                 .ToList();
-            for (int offset = 0; offset < ordered.Count; offset += settings.MaxPerCluster)
-                clusters.Add(CreateCluster(ordered.Skip(offset).Take(settings.MaxPerCluster).ToList(), alwaysVisible: false));
+        }
+
+        // MEROptimizer 2.0.8 grows each cluster from the next unassigned primitive and takes its
+        // nearest neighbours inside MaxDistanceForPrimitiveCluster. Keep that model while avoiding
+        // the standalone plugin's duplicate seed entry.
+        float maxDistanceSquared = settings.CellSize * settings.CellSize;
+        while (clustered.Count > 0)
+        {
+            token.ThrowIfCancellationRequested();
+            ClusterInput seed = clustered[0];
+            List<ClusterInput> neighbours = clustered
+                .Where(input => DistanceSquared(input.WorldPosition, seed.WorldPosition) <= maxDistanceSquared)
+                .OrderBy(input => DistanceSquared(input.WorldPosition, seed.WorldPosition))
+                .ThenBy(input => input.Index)
+                .Take(settings.MaxPerCluster)
+                .OrderBy(input => input.WorldPosition.Y)
+                .ToList();
+
+            var assigned = new HashSet<int>(neighbours.Select(input => input.Index));
+            clustered.RemoveAll(input => assigned.Contains(input.Index));
+            clusters.Add(CreateCluster(neighbours, alwaysVisible: false));
         }
 
         return new ClusterPlan { Clusters = clusters.ToArray() };
@@ -883,8 +981,6 @@ public static class PrimitiveOptimizationManager
 			!primitive._renderer.enabled)
 			return false;
 		bool assumedStatic = IsAssumedStatic(owner);
-		if (!primitive.IsStatic && !assumedStatic)
-			return false;
 		// A schematic parented under a player or another runtime object is explicitly dynamic even if
 		// its exported blocks were marked static (for example SCP-513 manifestations).
 		if (owner.transform.parent != null)
@@ -902,10 +998,8 @@ public static class PrimitiveOptimizationManager
         if (primitive.TryGetComponent(out SchematicBlock schematicBlock) && schematicBlock != null && schematicBlock.HasObjectPrefabKey)
             return false;
 
-        // The explicit assume-static allowlist is the operator's promise that the complete
-        // schematic is immutable. Avoid the otherwise expensive ancestor component scan for every
-        // primitive in very large schematics; that scan can reduce staggered loading to one block
-        // per frame and postpone gameplay objects for minutes.
+        // Explicitly allowlisted schematics skip the component walk. Other schematics are still
+        // eligible by default, matching MEROptimizer, but dynamic/animated ancestors are rejected.
         if (!assumedStatic && !IsStaticHierarchy(owner, primitive.transform))
             return false;
 
@@ -970,7 +1064,39 @@ public static class PrimitiveOptimizationManager
         return true;
     }
 
-    private static int FloorToInt(float value) => (int)Math.Floor(value);
+    private static float DistanceSquared(PackedVector3 value, PackedVector3 other) =>
+        DistanceSquared(value, other.X, other.Y, other.Z);
+
+    private static float DistanceSquared(PackedVector3 value, float x, float y, float z)
+    {
+        float dx = value.X - x;
+        float dy = value.Y - y;
+        float dz = value.Z - z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private static bool IsAlwaysVisible(PrimitiveObjectToy primitive)
+    {
+        if (CurrentConfig?.PrimitiveClusterizeSchematic == false)
+            return true;
+
+        float threshold = Math.Max(0f, CurrentConfig?.PrimitiveAlwaysVisibleSize ?? 0f);
+        if (threshold > 0f && ClientPrimitive.GetSizePriority(primitive) >= threshold)
+            return true;
+
+        IEnumerable<string>? patterns = CurrentConfig?.PrimitiveAlwaysVisibleNamePatterns;
+        if (patterns == null)
+            return false;
+
+        string primitiveName = primitive.name ?? string.Empty;
+        foreach (string? pattern in patterns)
+        {
+            if (!string.IsNullOrWhiteSpace(pattern) && GlobMatch(primitiveName, pattern.Trim()))
+                return true;
+        }
+
+        return false;
+    }
 
 	private static bool IsExcluded(SchematicObject owner, string? primitiveName)
 	{
@@ -1108,8 +1234,8 @@ public static class PrimitiveOptimizationManager
 
     private static bool DetectExternalMeroOptimizer()
     {
-        // MEROptimizer owns the same native PrimitiveObjectToy spawn path. Do not activate both
-        // optimizers; the integrated option is intentionally opt-in and defaults off in Config.
+        // The standalone MEROptimizer owns the same PrimitiveObjectToy spawn path. Never activate
+        // both implementations; the integrated backend logs the conflict and remains disabled.
         return AppDomain.CurrentDomain.GetAssemblies().Any(assembly =>
             assembly.GetName().Name?.IndexOf("MEROptimizer", StringComparison.OrdinalIgnoreCase) >= 0);
     }

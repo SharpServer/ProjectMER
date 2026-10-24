@@ -13,13 +13,12 @@ public class GenericEventsHandler : CustomEventsHandler
 {
 	public override void OnServerWaitingForPlayers()
 	{
-		// 前ラウンドの synthetic netId を先に破棄してから、新しい世代を開始する。
-		CullingManager.Stop();
-		// WaitingForPlayers is also reached after forced/admin restarts where RoundEnded may not have
-		// completed. Unload any surviving maps instead of only forgetting their dictionary entries;
-		// otherwise their GameObjects and staggered-load coroutines can accumulate across rounds.
-		foreach (string mapName in MapUtils.LoadedMaps.Keys.ToArray())
-			MapUtils.UnloadMap(mapName);
+		// 前ラウンドの内部状態を破棄してから、新しい世代を開始する。
+		CullingManager.ResetRoundState();
+		// WaitingForPlayers is also reached after forced/admin restarts where RoundEnded may not
+		// have completed. The server tears down scene objects; only stop pending work and forget
+		// references here so already-destroyed Unity objects are never destroyed a second time.
+		MapUtils.ResetRoundState();
 		PrimitiveOptimizationManager.Stop();
 
 		PrefabManager.RegisterPrefabs();
@@ -37,11 +36,10 @@ public class GenericEventsHandler : CustomEventsHandler
 	public override void OnServerRoundEnded(RoundEndedEventArgs ev)
 	{
 		// Mirror の netId カウンタが次ラウンド用にリセットされる前に、
-		// クライアント専用 Primitive を全クライアントから除去する。RoundEnding は
-		// キャンセル可能なので、確定後の RoundEnded でマップ自体も明示的に破棄する。
-		CullingManager.Stop();
-		foreach (string mapName in MapUtils.LoadedMaps.Keys.ToArray())
-			MapUtils.UnloadMap(mapName);
+		// クライアント専用 Primitive の内部状態を停止する。シーン実体はサーバーの
+		// ラウンド teardown が破棄するため、ProjectMER は参照だけを解放する。
+		CullingManager.ResetRoundState();
+		MapUtils.ResetRoundState();
 		PrimitiveOptimizationManager.Stop();
 	}
 

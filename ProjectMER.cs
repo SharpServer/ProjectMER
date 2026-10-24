@@ -2,6 +2,7 @@ global using Logger = LabApi.Features.Console.Logger;
 using System.IO;
 using HarmonyLib;
 using LabApi.Events.CustomHandlers;
+using LabApi.Features.Wrappers;
 using LabApi.Loader.Features.Paths;
 using LabApi.Loader.Features.Plugins;
 using MEC;
@@ -23,6 +24,11 @@ public class ProjectMER : Plugin<Config>
 	/// Gets the MapEditorReborn parent folder path.
 	/// </summary>
 	public static string PluginDir { get; private set; }
+
+	/// <summary>
+	/// Gets the folder path that is unique to the current server port.
+	/// </summary>
+	public static string PortDir { get; private set; }
 
 	/// <summary>
 	/// Gets the folder path in which the maps are stored.
@@ -51,14 +57,24 @@ public class ProjectMER : Plugin<Config>
 		_harmony.PatchAll();
 
 		PluginDir = Path.Combine(PathManager.Configs.FullName, "ProjectMER");
-		MapsDir = Path.Combine(PluginDir, "Maps");
-		SchematicsDir = Path.Combine(PluginDir, "Schematics");
+		PortDir = Path.Combine(PluginDir, Server.Port.ToString());
+		MapsDir = Path.Combine(PortDir, "Maps");
+		SchematicsDir = Path.Combine(PortDir, "Schematics");
 
 		if (!Directory.Exists(PluginDir))
 		{
 			Logger.Warn("Plugin directory does not exist. Creating...");
 			Directory.CreateDirectory(PluginDir);
 		}
+
+		if (!Directory.Exists(PortDir))
+		{
+			Logger.Warn("Port directory does not exist. Creating...");
+			Directory.CreateDirectory(PortDir);
+		}
+
+		MigrateLegacyDirectory(Path.Combine(PluginDir, "Maps"), MapsDir);
+		MigrateLegacyDirectory(Path.Combine(PluginDir, "Schematics"), SchematicsDir);
 
 		if (!Directory.Exists(MapsDir))
 		{
@@ -92,6 +108,22 @@ public class ProjectMER : Plugin<Config>
 			_mapFileSystemWatcher.Changed += OnMapFileChanged;
 
 			Logger.Debug("FileSystemWatcher enabled!");
+		}
+	}
+
+	private static void MigrateLegacyDirectory(string legacyDir, string newDir)
+	{
+		if (!Directory.Exists(legacyDir) || Directory.Exists(newDir))
+			return;
+
+		try
+		{
+			Logger.Warn($"Migrating legacy directory '{legacyDir}' to '{newDir}'...");
+			Directory.Move(legacyDir, newDir);
+		}
+		catch (Exception e)
+		{
+			Logger.Error($"Failed to migrate '{legacyDir}' to '{newDir}': {e.Message}");
 		}
 	}
 

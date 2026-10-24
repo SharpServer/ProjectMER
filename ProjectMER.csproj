@@ -8,27 +8,47 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <!--
+    参照アセンブリの場所。
+    1. 環境変数。Linux は大文字小文字を区別するため SL_REFERENCES / SL_References の両方を見る
+       （Windows はどちらの綴りでも同じ変数として解決される）。
+    2. 見つからなければ上位ディレクトリを辿って SL_References を探す。
+       Rider(snap) などの IDE はシェルの ~/.bashrc を経由せず起動するので環境変数が渡らず、
+       これが無いと HintPath が空のまま MSB3245 が並び、参照が欠けたままビルドが「成功」してしまう。
+  -->
+  <PropertyGroup>
+    <SLRefs Condition="'$(SLRefs)' == '' And '$(SL_REFERENCES)' != ''">$(SL_REFERENCES)</SLRefs>
+    <SLRefs Condition="'$(SLRefs)' == '' And '$(SL_References)' != ''">$(SL_References)</SLRefs>
+    <SLRefsRoot Condition="'$(SLRefs)' == ''">$([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildProjectDirectory)', 'SL_References/LabApi.dll'))</SLRefsRoot>
+    <SLRefs Condition="'$(SLRefs)' == '' And '$(SLRefsRoot)' != ''">$(SLRefsRoot)/SL_References</SLRefs>
+  </PropertyGroup>
+
+  <!-- 参照が解決できないまま中身の欠けた DLL が出来るより、はっきり落とす -->
+  <Target Name="ValidateSLRefs" BeforeTargets="ResolveAssemblyReferences" Condition="'$(SLRefs)' == ''">
+    <Error Text="SL_References が見つかりません。環境変数 SL_REFERENCES を設定するか、プロジェクトの上位ディレクトリに SL_References を置いてください。" />
+  </Target>
+
   <ItemGroup>
     <Compile Remove="SL-CustomObjects\**" />
     <None Remove="SL-CustomObjects\**" />
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="UnityEngine" HintPath="$(SL_REFERENCES)\UnityEngine.dll" />
-    <Reference Include="UnityEngine.AnimationModule" HintPath="$(SL_REFERENCES)\UnityEngine.AnimationModule.dll" />
-    <Reference Include="UnityEngine.CoreModule" HintPath="$(SL_REFERENCES)\UnityEngine.CoreModule.dll" />
-    <Reference Include="UnityEngine.AssetBundleModule" HintPath="$(SL_REFERENCES)\UnityEngine.AssetBundleModule.dll" />
-    <Reference Include="UnityEngine.PhysicsModule" HintPath="$(SL_REFERENCES)\UnityEngine.PhysicsModule.dll" />
-    <Reference Include="Unity.TextMeshPro" HintPath="$(SL_REFERENCES)\Unity.TextMeshPro.dll" />
-    <Reference Include="Mirror" HintPath="$(SL_REFERENCES)\Mirror.dll" />
-    <Reference Include="Assembly-CSharp" HintPath="$(SL_REFERENCES)\Assembly-CSharp-Publicized.dll" />
-    <Reference Include="Assembly-CSharp-firstpass" HintPath="$(SL_REFERENCES)\Assembly-CSharp-firstpass.dll" />
-	  <Reference Include="CommandSystem.Core" HintPath="$(SL_REFERENCES)\CommandSystem.Core.dll" />
-    <Reference Include="YamlDotNet" HintPath="$(SL_REFERENCES)\YamlDotNet.dll" />
-    <Reference Include="NorthwoodLib" HintPath="$(SL_REFERENCES)\NorthwoodLib.dll" />
-    <Reference Include="Pooling" HintPath="$(SL_REFERENCES)\Pooling.dll" />
-    <Reference Include="LabApi" HintPath="$(SL_REFERENCES)\LabApi.dll" />
-    <Reference Include="HintServiceMeow-Exiled" HintPath="$(SL_REFERENCES)\HintServiceMeow-Exiled.dll">
+    <Reference Include="UnityEngine" HintPath="$(SLRefs)\UnityEngine.dll" />
+    <Reference Include="UnityEngine.AnimationModule" HintPath="$(SLRefs)\UnityEngine.AnimationModule.dll" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(SLRefs)\UnityEngine.CoreModule.dll" />
+    <Reference Include="UnityEngine.AssetBundleModule" HintPath="$(SLRefs)\UnityEngine.AssetBundleModule.dll" />
+    <Reference Include="UnityEngine.PhysicsModule" HintPath="$(SLRefs)\UnityEngine.PhysicsModule.dll" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(SLRefs)\Unity.TextMeshPro.dll" />
+    <Reference Include="Mirror" HintPath="$(SLRefs)\Mirror.dll" />
+    <Reference Include="Assembly-CSharp" HintPath="$(SLRefs)\Assembly-CSharp-Publicized.dll" />
+    <Reference Include="Assembly-CSharp-firstpass" HintPath="$(SLRefs)\Assembly-CSharp-firstpass.dll" />
+	  <Reference Include="CommandSystem.Core" HintPath="$(SLRefs)\CommandSystem.Core.dll" />
+    <Reference Include="YamlDotNet" HintPath="$(SLRefs)\YamlDotNet.dll" />
+    <Reference Include="NorthwoodLib" HintPath="$(SLRefs)\NorthwoodLib.dll" />
+    <Reference Include="Pooling" HintPath="$(SLRefs)\Pooling.dll" />
+    <Reference Include="LabApi" HintPath="$(SLRefs)\LabApi.dll" />
+    <Reference Include="HintServiceMeow-Exiled" HintPath="$(SLRefs)\HintServiceMeow-Exiled.dll">
       <Private>False</Private>
     </Reference>
   </ItemGroup>
@@ -42,9 +62,9 @@
     Linux では SDK 既定の net48 参照アセンブリが使われる。
   -->
   <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
-    <Reference Include="mscorlib" HintPath="$(SL_REFERENCES)\mscorlib.dll" Private="false" />
-    <Reference Include="System" HintPath="$(SL_REFERENCES)\System.dll" Private="false" />
-    <Reference Include="netstandard" HintPath="$(SL_REFERENCES)\netstandard.dll" Private="false" />
+    <Reference Include="mscorlib" HintPath="$(SLRefs)\mscorlib.dll" Private="false" />
+    <Reference Include="System" HintPath="$(SLRefs)\System.dll" Private="false" />
+    <Reference Include="netstandard" HintPath="$(SLRefs)\netstandard.dll" Private="false" />
   </ItemGroup>
 
   <ItemGroup>
@@ -52,13 +72,24 @@
     <PackageReference Include="Lib.Harmony" Version="2.3.6" />
   </ItemGroup>
 
+  <!--
+    %APPDATA% は Windows のみ。Linux では Mono の SpecialFolder.ApplicationData と
+    同じ場所（XDG_CONFIG_HOME、既定は $HOME/.config）に LabAPI のプラグインツリーがある。
+    Windows のビルド結果は $(APPDATA) がそのまま採用されるので従来どおり。
+  -->
+  <PropertyGroup>
+    <LabApiAppDataDir Condition="'$(APPDATA)' != ''">$(APPDATA)</LabApiAppDataDir>
+    <LabApiAppDataDir Condition="'$(LabApiAppDataDir)' == '' And '$(XDG_CONFIG_HOME)' != ''">$(XDG_CONFIG_HOME)</LabApiAppDataDir>
+    <LabApiAppDataDir Condition="'$(LabApiAppDataDir)' == '' And '$(HOME)' != ''">$(HOME)/.config</LabApiAppDataDir>
+  </PropertyGroup>
+
   <Target Name="CopyReleaseToLabApiAndReferences" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
     <PropertyGroup>
-      <SLReferencesDir>$(SL_References)</SLReferencesDir>
-      <LabApiPluginsDir>$(APPDATA)\SCP Secret Laboratory\LabAPI\plugins\7777</LabApiPluginsDir>
+      <SLReferencesDir>$(SLRefs)</SLReferencesDir>
+      <LabApiPluginsDir>$(LabApiAppDataDir)/SCP Secret Laboratory/LabAPI/plugins/7777</LabApiPluginsDir>
     </PropertyGroup>
-    <Error Condition="'$(SLReferencesDir)' == ''" Text="The SL_References environment variable is not set." />
-    <Error Condition="'$(APPDATA)' == ''" Text="The APPDATA environment variable is not set." />
+    <Error Condition="'$(SLReferencesDir)' == ''" Text="SL_References が見つかりません。環境変数 SL_REFERENCES を設定するか、プロジェクトの上位ディレクトリに SL_References を置いてください。" />
+    <Error Condition="'$(LabApiAppDataDir)' == ''" Text="Neither the APPDATA nor the XDG_CONFIG_HOME/HOME environment variable is set." />
     <MakeDir Directories="$(SLReferencesDir);$(LabApiPluginsDir)" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(SLReferencesDir)" SkipUnchangedFiles="false" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(LabApiPluginsDir)" SkipUnchangedFiles="false" />

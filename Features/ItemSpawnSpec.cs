@@ -4,8 +4,8 @@ namespace ProjectMER.Features;
 /// ItemSpawnpoint / Pickup / Locker の統一アイテム指定文字列の解釈結果。
 /// <list type="bullet">
 /// <item>"Medkit" — カスタムアイテム優先で解決し、無ければ ItemType として解釈</item>
-/// <item>"(ItemType)Medkit" / "(Item)Medkit" / "(Vanilla)Medkit" — ItemType のみ</item>
-/// <item>"(CItem)MyItem" / "(CustomItem)MyItem" / "(Custom)MyItem" — カスタムアイテムのみ</item>
+/// <item>"(ItemType)Medkit" — ItemType のみ</item>
+/// <item>"(CustomItem)MyItem" — カスタムアイテムのみ</item>
 /// <item>空文字 — 旧来の CustomItemKey / ItemType プロパティへフォールバック</item>
 /// </list>
 /// ItemType 名の照合は寛容で、大文字小文字・空白・アンダースコア・ハイフン・ドットの違いを無視する
@@ -13,6 +13,12 @@ namespace ProjectMER.Features;
 /// </summary>
 public readonly struct ItemSpawnSpec
 {
+	/// <summary>ItemType を明示する正式プレフィックス。</summary>
+	public const string VanillaPrefix = "(ItemType)";
+
+	/// <summary>カスタムアイテムを明示する正式プレフィックス。</summary>
+	public const string CustomPrefix = "(CustomItem)";
+
 	private enum Kind
 	{
 		/// <summary>旧来動作: ItemType プロパティでスポーン。</summary>
@@ -99,13 +105,32 @@ public readonly struct ItemSpawnSpec
 						// 未知のプレフィックスは括弧ごと名前の一部として扱う（旧挙動）が、
 						// 綴り間違いを黙って握り潰さないよう警告する。
 						Logger.Warn($"Unknown item specification prefix \"({prefix})\" in \"{trimmed}\". " +
-						            "Expected \"(ItemType)\" or \"(CItem)\". Treating the whole string as an item name.");
+						            $"Expected \"{VanillaPrefix}\" or \"{CustomPrefix}\". Treating the whole string as an item name.");
 						break;
 				}
 			}
 		}
 
 		return new ItemSpawnSpec(Kind.Auto, trimmed);
+	}
+
+	/// <summary>
+	/// 入力互換の別名を正式な (ItemType)/(CustomItem) 表記へ正規化する。
+	/// プレフィックス無しの指定は自動解決の意味を保つ。
+	/// </summary>
+	public static string Canonicalize(string? item)
+	{
+		string trimmed = item?.Trim() ?? string.Empty;
+		if (trimmed.Length == 0)
+			return string.Empty;
+
+		ItemSpawnSpec parsed = Parse(trimmed, null);
+		return parsed._kind switch
+		{
+			Kind.CustomOnly => CustomPrefix + parsed.Name,
+			Kind.VanillaOnly => VanillaPrefix + parsed.Name,
+			_ => trimmed,
+		};
 	}
 
 	/// <summary>

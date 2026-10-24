@@ -18,6 +18,17 @@ public class SerializableSchematic : SerializableObject
 	public string SchematicName { get; set; } = "None";
 
 	public override GameObject? SpawnOrUpdateObject(Room? room = null, GameObject? instance = null)
+		=> SpawnOrUpdateObject(room, instance, null);
+
+	/// <summary>
+	/// Spawns or updates this schematic while applying optional visual overrides.
+	/// Overrides are applied before primitives are network-spawned and therefore also
+	/// work with ProjectMER's primitive optimization path.
+	/// </summary>
+	public GameObject? SpawnOrUpdateObject(
+		Room? room,
+		GameObject? instance,
+		SchematicSpawnOptions? options)
 	{
 		PrimitiveObjectToy schematic = instance == null ? UnityEngine.Object.Instantiate(PrefabManager.PrimitiveObject) : instance.GetComponent<PrimitiveObjectToy>();
 		schematic.NetworkPrimitiveFlags = PrimitiveFlags.None;
@@ -52,7 +63,7 @@ public class SerializableSchematic : SerializableObject
 			}
 
 			NetworkServer.Spawn(schematic.gameObject);
-			schematic.gameObject.AddComponent<SchematicObject>().Init(data);
+			schematic.gameObject.AddComponent<SchematicObject>().Init(data, options);
 		}
 
 		return schematic.gameObject;
@@ -63,7 +74,11 @@ public class SerializableSchematic : SerializableObject
 	/// スキマティックのブロック生成を複数フレームへ分散し、大規模スキマティック
 	/// （数千～数万ブロック）による長時間のメインスレッド占有を避ける。
 	/// </summary>
-	public IEnumerator<float> SpawnOrUpdateObjectStaggered(Room? room, float frameBudgetMs, Action<GameObject?>? onComplete = null)
+	public IEnumerator<float> SpawnOrUpdateObjectStaggered(
+		Room? room,
+		float frameBudgetMs,
+		Action<GameObject?>? onComplete = null,
+		SchematicSpawnOptions? options = null)
 	{
 		PrimitiveObjectToy schematic = UnityEngine.Object.Instantiate(PrefabManager.PrimitiveObject);
 		bool completed = false;
@@ -130,7 +145,7 @@ public class SerializableSchematic : SerializableObject
 		NetworkServer.Spawn(schematic.gameObject);
 		SchematicObject schematicObject = schematic.gameObject.AddComponent<SchematicObject>();
 
-		IEnumerator<float> init = schematicObject.InitStaggered(data, frameBudgetMs);
+		IEnumerator<float> init = schematicObject.InitStaggered(data, frameBudgetMs, options: options);
 			try
 			{
 		while (init.MoveNext())

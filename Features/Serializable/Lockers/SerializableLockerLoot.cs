@@ -15,6 +15,8 @@ public class SerializableLockerLoot
 
 	public ItemType TargetItem { get; set; }
 
+	public string CustomItem { get; set; } = string.Empty;
+
 	public int RemainingUses { get; set; }
 
 	public int MaxPerChamber { get; set; }

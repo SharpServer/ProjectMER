@@ -23,7 +23,7 @@ public static class CullingManager
     // Spawn/Destroy must remain reliable and ordered for vanilla clients. Throughput is therefore
     // controlled with byte/object token buckets and AIMD feedback instead of a fixed tiny cap.
     private const float MinimumSchedulerInterval = 0.02f;
-    private const float MinimumPrimitiveRate = 20f;
+    private const float AbsoluteMinimumPrimitiveRate = 20f;
     private const float PressureSampleInterval = 0.25f;
     private const int TransitionAttemptMultiplier = 4;
 
@@ -314,6 +314,7 @@ public static class CullingManager
     private static float _lastGlobalTokenUpdate;
     private static float _nextGlobalPressureSample;
     private static float _initialPrimitiveRate;
+    private static float _minimumPrimitiveRate;
     private static int _primitiveInitialBurstObjects;
     private static float _maximumPrimitiveRate;
     private static float _initialGlobalPrimitiveRate;
@@ -517,7 +518,8 @@ public static class CullingManager
             _primitiveObjectsPerUpdate,
             config.PrimitiveGlobalObjectsPerUpdate);
         _primitiveTransitionBurst = Math.Max(1, config.PrimitiveTransitionBurstObjects);
-        _initialPrimitiveRate = Math.Max(MinimumPrimitiveRate, config.PrimitiveInitialObjectsPerSecond);
+        _minimumPrimitiveRate = Math.Max(AbsoluteMinimumPrimitiveRate, config.PrimitiveMinObjectsPerSecond);
+        _initialPrimitiveRate = Math.Max(_minimumPrimitiveRate, config.PrimitiveInitialObjectsPerSecond);
         _primitiveInitialBurstObjects = Math.Max(1, config.PrimitiveInitialBurstObjects);
         _maximumPrimitiveRate = Math.Max(_initialPrimitiveRate, config.PrimitiveMaxObjectsPerSecond);
         _initialGlobalPrimitiveRate = Math.Max(_initialPrimitiveRate, config.PrimitiveGlobalInitialObjectsPerSecond);
@@ -564,12 +566,20 @@ public static class CullingManager
             _cullingCoroutine = Timing.RunCoroutine(CullingLoop());
     }
 
-    public static void Stop()
+    public static void Stop() => Stop(reconcileClientVisibility: true);
+
+    /// <summary>
+    /// Stops culling at a round boundary and forgets its internal state without
+    /// sending Hide/Spawn traffic for scene objects owned by the server teardown.
+    /// </summary>
+    public static void ResetRoundState() => Stop(reconcileClientVisibility: false);
+
+    private static void Stop(bool reconcileClientVisibility)
     {
         _running = false;
         Timing.KillCoroutines(_cullingCoroutine);
         _cullingCoroutine = default;
-        RestoreAndClear();
+        RestoreAndClear(reconcileClientVisibility);
         _textEnabled = false;
         _primitiveEnabled = false;
     }
@@ -1083,9 +1093,9 @@ public static class CullingManager
 
             float maximumRate = GetMaximumPlayerRate();
             if (hardPressure)
-                state.PrimitiveRate = Math.Max(MinimumPrimitiveRate, state.PrimitiveRate * 0.5f);
+                state.PrimitiveRate = Math.Max(_minimumPrimitiveRate, state.PrimitiveRate * 0.5f);
             else if (softPressure)
-                state.PrimitiveRate = Math.Max(MinimumPrimitiveRate, state.PrimitiveRate * 0.8f);
+                state.PrimitiveRate = Math.Max(_minimumPrimitiveRate, state.PrimitiveRate * 0.8f);
             else
                 state.PrimitiveRate = Math.Min(
                     maximumRate,
@@ -1192,7 +1202,7 @@ public static class CullingManager
     }
 
     private static float GetMaximumPlayerRate() => Math.Max(
-        MinimumPrimitiveRate,
+        _minimumPrimitiveRate,
         Math.Min(_maximumPrimitiveRate, _primitiveObjectsPerUpdate / _sendInterval));
 
     private static float GetMaximumGlobalRate() => Math.Max(
@@ -1498,23 +1508,26 @@ public static class CullingManager
         }
     }
 
-    private static void RestoreAndClear()
+    private static void RestoreAndClear(bool reconcileClientVisibility)
     {
-        foreach (NetworkIdentity identity in IdentityGroups.Keys)
-        {
-            if (identity == null)
-                continue;
-            identity.visible = Visibility.Default;
-            if (NetworkServer.active && identity.isServer)
-                NetworkServer.RebuildObservers(identity, true);
-        }
+		if (reconcileClientVisibility)
+		{
+			foreach (NetworkIdentity identity in IdentityGroups.Keys)
+			{
+				if (identity == null)
+					continue;
+				identity.visible = Visibility.Default;
+				if (NetworkServer.active && identity.isServer)
+					NetworkServer.RebuildObservers(identity, true);
+			}
 
-        foreach (ClientPrimitive primitive in ClientPrimitiveGroups.Keys)
-            foreach (NetworkConnectionToClient connection in PlayerStates.Keys)
-            {
-                primitive.Hide(connection);
-                primitive.ForgetViewer(connection);
-            }
+			foreach (ClientPrimitive primitive in ClientPrimitiveGroups.Keys)
+				foreach (NetworkConnectionToClient connection in PlayerStates.Keys)
+				{
+					primitive.Hide(connection);
+					primitive.ForgetViewer(connection);
+				}
+		}
 
         Groups.Clear();
         IdentityGroups.Clear();

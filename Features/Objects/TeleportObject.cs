@@ -9,12 +9,12 @@ public class TeleportObject : MonoBehaviour, ITeleporter
 	public SerializableTeleport Base = null!;
 	private MapEditorObject _mapEditorObject = null!;
 	private BoxCollider? _trigger;
-	private readonly HashSet<ReferenceHub> _ignoredPlayers = [];
+	private readonly HashSet<uint> _ignoredPlayers = [];
 
 	Transform ITeleporter.Transform => transform;
 	BoxCollider? ITeleporter.Trigger => _trigger;
 	float ITeleporter.TeleportCooldown => Base.Cooldown;
-	HashSet<ReferenceHub> ITeleporter.IgnoredPlayers => _ignoredPlayers;
+	HashSet<uint> ITeleporter.IgnoredPlayers => _ignoredPlayers;
 	ITeleporter? ITeleporter.GetTarget() => GetRandomTarget();
 
 	private void Start()

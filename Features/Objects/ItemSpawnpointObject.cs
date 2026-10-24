@@ -100,7 +100,7 @@ public class ItemSpawnpointObject : MonoBehaviour
 			if (!spec.AllowsVanilla)
 			{
 				Logger.Warn($"ItemSpawnpoint custom item \"{spec.Name}\" has no registered custom item provider. " +
-				            "Remove the \"(CItem)\" prefix to fall back to a vanilla ItemType.");
+				            $"Remove the \"{ItemSpawnSpec.CustomPrefix}\" prefix to fall back to a vanilla ItemType.");
 				break;
 			}
 

@@ -39,7 +39,11 @@ public class SchematicBlockData
 
 	public virtual Dictionary<string, object> Properties { get; set; }
 
-	public GameObject Create(SchematicObject schematicObject, Transform parentTransform, bool isLeaf)
+	public GameObject Create(
+		SchematicObject schematicObject,
+		Transform parentTransform,
+		bool isLeaf,
+		Color? primitiveColorOverride = null)
 	{
 		Vector3 localScale = Scale;
 		Quaternion localRotation = Quaternion.Euler(Rotation);
@@ -55,7 +59,7 @@ public class SchematicBlockData
 		GameObject gameObject = BlockType switch
 		{
 			BlockType.Empty => CreateEmpty(),
-			BlockType.Primitive => CreatePrimitive(primitiveType),
+			BlockType.Primitive => CreatePrimitive(primitiveType, primitiveColorOverride),
 			BlockType.Light => CreateLight(),
 			BlockType.Pickup => CreatePickup(schematicObject),
 			BlockType.Workstation => CreateWorkstation(),
@@ -90,8 +94,7 @@ public class SchematicBlockData
 		// マップ配置ロッカー（SerializableLocker）も同じ順序で処理している。
 		if (gameObject.TryGetComponent(out StructurePositionSync structurePositionSync))
 		{
-			structurePositionSync.Network_position = transform.position;
-			structurePositionSync.Network_rotationY = (sbyte)Mathf.RoundToInt(transform.rotation.eulerAngles.y / 5.625f);
+			StructureTransformSync.Attach(structurePositionSync);
 		}
 
 		if (gameObject.TryGetComponent(out AdminToyBase adminToyBase))
@@ -120,12 +123,12 @@ public class SchematicBlockData
 		return primitive.gameObject;
 	}
 
-	private GameObject CreatePrimitive(PrimitiveType primitiveType)
+	private GameObject CreatePrimitive(PrimitiveType primitiveType, Color? colorOverride)
 	{
 		PrimitiveObjectToy primitive = GameObject.Instantiate(PrefabManager.PrimitiveObject);
 
 		primitive.NetworkPrimitiveType = primitiveType;
-		primitive.NetworkMaterialColor = Properties["Color"].ToString().GetColorFromString();
+		primitive.NetworkMaterialColor = colorOverride ?? Properties["Color"].ToString().GetColorFromString();
 
 		PrimitiveFlags primitiveFlags;
 		if (Properties.TryGetValue("PrimitiveFlags", out object flags))
@@ -217,7 +220,7 @@ public class SchematicBlockData
 		bool triggerSpawn = Properties.TryGetValue("TriggerSpawn", out object triggerObj) && Convert.ToBoolean(triggerObj);
 
 		// 統一 Item 指定（または旧 CustomItem / TriggerSpawn）は、スキマティック配置完了後に
-		// CItem 優先で解決する遅延スポーナーへ委譲する。
+		// カスタムアイテム優先で解決する遅延スポーナーへ委譲する。
 		if (!string.IsNullOrWhiteSpace(item) || !string.IsNullOrWhiteSpace(legacyCustomItem) || triggerSpawn)
 		{
 			ItemType fallbackItemType = Properties.TryGetValue("ItemType", out object legacyType)
@@ -269,7 +272,7 @@ public class SchematicBlockData
 	{
 		TextToy text = GameObject.Instantiate(PrefabManager.Text);
 
-		text.TextFormat = Convert.ToString(Properties["Text"]);
+		text.TextFormat = SchematicTextFormatting.ForNativeCanvas(Properties);
 		text.DisplaySize = Properties["DisplaySize"].ToVector2() * 20f;
 
 		return text.gameObject;
@@ -343,16 +346,19 @@ public class SchematicBlockData
 			LockerEventsHandler.RegisterInteractLock(locker);
 
 		List<string> items = Properties.GetStringList("Items");
+		bool emptyContents = items.Count == 0 && Properties.GetBool("EmptyContents");
 		IReadOnlyList<object> lootData = Properties.GetList("Loot");
 		IReadOnlyList<object> chamberData = Properties.GetList("Chambers");
 
-		if (items.Count == 0 && lootData.Count == 0 && chamberData.Count == 0)
+		if (!emptyContents && items.Count == 0 && lootData.Count == 0 && chamberData.Count == 0)
 			return;
 
 		LabApiLocker labApiLocker = LabApiLocker.Get(locker);
-		bool useSimpleItems = items.Count > 0;
+		bool useSimpleItems = items.Count > 0 || emptyContents;
+		List<Lockers.SerializableLockerLoot> loot = ParseLoot(lootData);
+		bool useMixedLoot = !useSimpleItems && loot.Any(entry => !string.IsNullOrWhiteSpace(entry.CustomItem));
 
-		if (useSimpleItems)
+		if (useSimpleItems || useMixedLoot)
 		{
 			// 簡易 Items 指定時はネイティブの初回抽選そのものを止める
 			labApiLocker.ClearLockerLoot();
@@ -360,7 +366,7 @@ public class SchematicBlockData
 		}
 		else if (lootData.Count > 0)
 		{
-			LockerConfigurator.ApplyLoot(labApiLocker, ParseLoot(lootData));
+			LockerConfigurator.ApplyLoot(labApiLocker, loot);
 		}
 
 		List<Lockers.SerializableLockerChamber> chambers = ParseChambers(chamberData);
@@ -395,6 +401,8 @@ public class SchematicBlockData
 
 			if (useSimpleItems)
 				LockerConfigurator.FillItems(labApiLocker, items, shuffleChambers);
+			else if (useMixedLoot)
+				LockerConfigurator.FillMixedLoot(labApiLocker, loot);
 
 			LockerConfigurator.UnfreezeContents(labApiLocker);
 
@@ -422,15 +430,16 @@ public class SchematicBlockData
 				continue;
 
 			ItemType targetItem = (ItemType)entry.GetInt("TargetItem", (int)ItemType.None);
-			if (targetItem == ItemType.None)
+			string customItem = entry.TryGetValue("CustomItem", out object? custom) ? custom?.ToString() ?? string.Empty : string.Empty;
+			if (targetItem == ItemType.None && string.IsNullOrWhiteSpace(customItem))
 				continue;
 
 			loot.Add(new Lockers.SerializableLockerLoot(
 				targetItem,
-				Math.Max(1, entry.GetInt("RemainingUses", 1)),
+				Math.Max(0, entry.GetInt("RemainingUses", 1)),
 				Math.Max(1, entry.GetInt("MaxPerChamber", 1)),
 				Math.Max(0, entry.GetInt("ProbabilityPoints", 100)),
-				Math.Max(0, entry.GetInt("MinPerChamber", 1))));
+				Math.Max(0, entry.GetInt("MinPerChamber", 1))) { CustomItem = customItem.Trim() });
 		}
 
 		return loot;

@@ -22,9 +22,9 @@ internal static class TeleportHelper
 	private const float MinimumSweepStep = 0.2f;
 	private const int MaxSweepSamples = 8;
 	private static readonly float[] VerticalSampleHeights = [0f, 0.9f, 1.7f];
-	private static readonly Dictionary<ReferenceHub, float> PlayerNextUseTimes = [];
+	private static readonly Dictionary<uint, float> PlayerNextUseTimes = [];
 	private static readonly Dictionary<int, ArrivalReservation> ArrivalReservations = [];
-	private static readonly Dictionary<ReferenceHub, PlayerMotionSample> PlayerMotionSamples = [];
+	private static readonly Dictionary<uint, PlayerMotionSample> PlayerMotionSamples = [];
 
 	public static void ConfigureTrigger(BoxCollider boxCollider, Vector3 size)
 	{
@@ -42,11 +42,17 @@ internal static class TeleportHelper
 		if (trigger == null)
 			return;
 
-		HashSet<ReferenceHub> ignoredPlayers = source.IgnoredPlayers;
+		HashSet<uint> ignoredPlayers = source.IgnoredPlayers;
 
 		foreach (Player player in Player.ReadyList)
 		{
+			// Round transitions can leave a destroyed hub in ReadyList. Touching it (hash, netId) throws
+			// on every FixedUpdate of every teleporter, flooding the log and tanking TPS.
 			ReferenceHub hub = player.ReferenceHub;
+			if (hub == null)
+				continue;
+
+			uint hubId = hub.netId;
 
 			if (player.RoleBase is not IFpcRole fpcRole || !IsInside(trigger, player, fpcRole))
 			{
@@ -55,13 +61,13 @@ internal static class TeleportHelper
 				// physics step; releasing the hold immediately on the first outside sample then
 				// allows one delayed bounce as soon as the cooldown expires.
 				if (!IsOnCooldown(player))
-					ignoredPlayers.Remove(hub);
+					ignoredPlayers.Remove(hubId);
 
 				continue;
 			}
 
 			// Player is inside. Skip if they just arrived here or are still cooling down.
-			if (ignoredPlayers.Contains(hub) || IsOnCooldown(player))
+			if (ignoredPlayers.Contains(hubId) || IsOnCooldown(player))
 				continue;
 
 			ITeleporter? target = source.GetTarget();
@@ -69,7 +75,7 @@ internal static class TeleportHelper
 			{
 				// Misconfigured/unreachable teleporter (bad id, target in an unloaded room): rate-limit the
 				// FindObjectsByType scan so a player standing on a dead pad doesn't run it every physics tick.
-				PlayerNextUseTimes[hub] = Time.time + MinimumPlayerCooldown;
+				PlayerNextUseTimes[hubId] = Time.time + MinimumPlayerCooldown;
 				continue;
 			}
 
@@ -78,8 +84,8 @@ internal static class TeleportHelper
 			// overlaps this trigger (common for closely-placed/paired teleporters), the next
 			// Tick would otherwise see them "freshly entering" here once only the cooldown
 			// gate remains, causing a fast A<->B ping-pong.
-			ignoredPlayers.Add(hub);
-			target.IgnoredPlayers.Add(hub);
+			ignoredPlayers.Add(hubId);
+			target.IgnoredPlayers.Add(hubId);
 
 			Teleport(player, target.Transform, target.Trigger, source.TeleportCooldown);
 		}
@@ -87,13 +93,14 @@ internal static class TeleportHelper
 
 	public static bool IsOnCooldown(Player player)
 	{
-		if (!PlayerNextUseTimes.TryGetValue(player.ReferenceHub, out float nextUseTime))
+		ReferenceHub hub = player.ReferenceHub;
+		if (hub == null || !PlayerNextUseTimes.TryGetValue(hub.netId, out float nextUseTime))
 			return false;
 
 		if (nextUseTime > Time.time)
 			return true;
 
-		PlayerNextUseTimes.Remove(player.ReferenceHub);
+		PlayerNextUseTimes.Remove(hub.netId);
 		return false;
 	}
 
@@ -104,7 +111,7 @@ internal static class TeleportHelper
 		SetMotionSample(player, exitPosition);
 		player.LookRotation = targetTransform.eulerAngles;
 		NeutralizeFallVelocity(player);
-		PlayerNextUseTimes[player.ReferenceHub] = Time.time + Mathf.Max(MinimumPlayerCooldown, cooldown);
+		PlayerNextUseTimes[player.ReferenceHub.netId] = Time.time + Mathf.Max(MinimumPlayerCooldown, cooldown);
 	}
 
 	public static void ClearArrivalReservation(Transform targetTransform)
@@ -193,7 +200,7 @@ internal static class TeleportHelper
 
 	private static PlayerMotionSample GetMotionSample(Player player)
 	{
-		ReferenceHub hub = player.ReferenceHub;
+		uint hub = player.ReferenceHub.netId;
 		float fixedTime = Time.fixedTime;
 		Vector3 currentPosition = player.Position;
 
@@ -222,7 +229,7 @@ internal static class TeleportHelper
 
 	private static void SetMotionSample(Player player, Vector3 position)
 	{
-		PlayerMotionSamples[player.ReferenceHub] = new PlayerMotionSample
+		PlayerMotionSamples[player.ReferenceHub.netId] = new PlayerMotionSample
 		{
 			FixedTime = Time.fixedTime,
 			PreviousPosition = position,
@@ -298,7 +305,7 @@ internal interface ITeleporter
 
 	float TeleportCooldown { get; }
 
-	HashSet<ReferenceHub> IgnoredPlayers { get; }
+	HashSet<uint> IgnoredPlayers { get; }
 
 	ITeleporter? GetTarget();
 }

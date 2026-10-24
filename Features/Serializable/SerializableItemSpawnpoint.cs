@@ -25,7 +25,7 @@ public class SerializableItemSpawnpoint : SerializableObject, IIndicatorDefiniti
 
 	/// <summary>
 	/// 統一アイテム指定。カスタムアイテム優先で解決し、無ければ ItemType として解釈する。
-	/// "(ItemType)Medkit" / "(CItem)MyItem" で種類を強制できる。
+	/// "(ItemType)Medkit" / "(CustomItem)MyItem" で種類を強制できる。
 	/// 空の場合は旧来の CustomItemKey / ItemType プロパティが使われる。
 	/// </summary>
 	public string Item { get; set; } = string.Empty;

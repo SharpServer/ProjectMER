@@ -19,12 +19,12 @@ public class SchematicTeleportObject : MonoBehaviour, ITeleporter
     public float Cooldown = 5f;
 
     private BoxCollider? _trigger;
-    private readonly HashSet<ReferenceHub> _ignoredPlayers = [];
+    private readonly HashSet<uint> _ignoredPlayers = [];
 
     Transform ITeleporter.Transform => transform;
     BoxCollider? ITeleporter.Trigger => _trigger;
     float ITeleporter.TeleportCooldown => Cooldown;
-    HashSet<ReferenceHub> ITeleporter.IgnoredPlayers => _ignoredPlayers;
+    HashSet<uint> ITeleporter.IgnoredPlayers => _ignoredPlayers;
     ITeleporter? ITeleporter.GetTarget() => GetRandomTarget();
 
     private void Awake()

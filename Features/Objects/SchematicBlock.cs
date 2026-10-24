@@ -59,5 +59,6 @@ public class SchematicBlock : MonoBehaviour
     {
         Schematic = schematic;
         Data = data;
+        SchematicCustomHitbox.Attach(this);
     }
 }

@@ -20,7 +20,7 @@ Unzip [`Harmony-Fat.2.3.6.0.zip`](https://github.com/pardeike/Harmony/releases/d
 
 Within the unzipped archive, move `net48/0Harmony.dll` to `LabAPI/dependencies/global/`.
 
-Once your plugin loads, it will create a directory at `LabAPI/configs/ProjectMER`. This directory will contain two sub-directories: **Schematics** and **Maps**.
+Once your plugin loads, it will create a directory at `LabAPI/configs/ProjectMER/<port>` (where `<port>` is the server port, e.g. `7777`). This directory will contain two sub-directories: **Schematics** and **Maps**.
 
 **[Wiki (WIP)](https://github.com/Michal78900/ProjectMER/wiki)**
 

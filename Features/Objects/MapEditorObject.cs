@@ -76,6 +76,12 @@ public class MapEditorObject : MonoBehaviour
 	/// </summary>
 	public void Destroy()
 	{
+		// Unity objects can remain in SpawnedObjects after their native component has
+		// already been destroyed by another owner. Accessing Component.gameObject in
+		// that state throws before UnityEngine.Object.Destroy can be reached.
+		if (this == null)
+			return;
+
 		if (TryGetComponent(out NetworkIdentity identity))
 			CullingManager.UnregisterCullable(identity);
 

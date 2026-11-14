@@ -260,7 +260,7 @@ public static class MapUtils
 
 		try
 		{
-			data = JsonSerializer.Deserialize<SchematicObjectDataList>(File.ReadAllText(schematicJsonPath));
+			data = SchematicDataLoader.Load(schematicJsonPath);
 			data.Path = schematicDirPath;
 		}
 		catch (JsonParsingException e)
@@ -333,7 +333,7 @@ public static class MapUtils
 			{
 				// Do not move Unity/Mirror access into this task. These are the only expensive operations that run
 				// away from the main thread for the staggered spawn path.
-				SchematicObjectDataList data = JsonSerializer.Deserialize<SchematicObjectDataList>(File.ReadAllText(schematicJsonPath));
+				SchematicObjectDataList data = SchematicDataLoader.Load(schematicJsonPath);
 				return new SchematicDataLoadResult(data, null, schematicDirPath);
 			}
 			catch (Exception error)
@@ -344,6 +344,9 @@ public static class MapUtils
 			}
 		});
 	}
+
+	/// <summary>解析済みスキマティック JSON のキャッシュを破棄する。</summary>
+	public static void ClearSchematicDataCache() => SchematicDataLoader.Clear();
 
 	public static string[] GetAvailableSchematicNames() => Directory.GetFiles(ProjectMER.SchematicsDir, "*.json", SearchOption.AllDirectories).Select(Path.GetFileNameWithoutExtension).Where(x => !x.Contains('-')).ToArray();
 

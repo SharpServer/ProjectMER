@@ -606,7 +606,7 @@ public class SchematicObject : MonoBehaviour
             return;
 
         List<SchematicTeleportData> teleportDataList =
-            JsonSerializer.Deserialize<List<SchematicTeleportData>>(File.ReadAllText(teleportPath));
+            JsonSerializer.Deserialize<List<SchematicTeleportData>>(File.ReadAllBytes(teleportPath));
 
         foreach (SchematicTeleportData teleportData in teleportDataList)
         {
@@ -639,7 +639,7 @@ public class SchematicObject : MonoBehaviour
             return;
 
         List<SchematicTriggerPointData> triggerPointDataList =
-            JsonSerializer.Deserialize<List<SchematicTriggerPointData>>(File.ReadAllText(triggerPointPath));
+            JsonSerializer.Deserialize<List<SchematicTriggerPointData>>(File.ReadAllBytes(triggerPointPath));
 
         foreach (SchematicTriggerPointData triggerPointData in triggerPointDataList)
         {
@@ -669,7 +669,7 @@ public class SchematicObject : MonoBehaviour
             return;
 
         List<SchematicObjectPrefabData> objectPrefabDataList =
-            JsonSerializer.Deserialize<List<SchematicObjectPrefabData>>(File.ReadAllText(objectPrefabPath));
+            JsonSerializer.Deserialize<List<SchematicObjectPrefabData>>(File.ReadAllBytes(objectPrefabPath));
 
         foreach (SchematicObjectPrefabData objectPrefabData in objectPrefabDataList)
         {
@@ -706,7 +706,7 @@ public class SchematicObject : MonoBehaviour
             return;
 
         List<SchematicDoorJsonData> doorDataList =
-            JsonSerializer.Deserialize<List<SchematicDoorJsonData>>(File.ReadAllText(doorPath));
+            JsonSerializer.Deserialize<List<SchematicDoorJsonData>>(File.ReadAllBytes(doorPath));
 
         foreach (SchematicDoorJsonData jsonData in doorDataList)
         {
@@ -736,7 +736,7 @@ public class SchematicObject : MonoBehaviour
             return false;
 
         foreach (KeyValuePair<int, SerializableRigidbody> dict in
-                 JsonSerializer.Deserialize<Dictionary<int, SerializableRigidbody>>(File.ReadAllText(rigidbodyPath)))
+                 JsonSerializer.Deserialize<Dictionary<int, SerializableRigidbody>>(File.ReadAllBytes(rigidbodyPath)))
         {
             if (!ObjectFromId.TryGetValue(dict.Key, out Transform tf))
                 continue;
@@ -761,7 +761,7 @@ public class SchematicObject : MonoBehaviour
 		if (!File.Exists(markerPath))
 			return;
 
-		List<SchematicEventInvokeMarkerData> markers = JsonSerializer.Deserialize<List<SchematicEventInvokeMarkerData>>(File.ReadAllText(markerPath));
+		List<SchematicEventInvokeMarkerData> markers = JsonSerializer.Deserialize<List<SchematicEventInvokeMarkerData>>(File.ReadAllBytes(markerPath));
 		foreach (SchematicEventInvokeMarkerData markerData in markers)
 		{
 			GameObject markerGo = new GameObject(markerData.Name);

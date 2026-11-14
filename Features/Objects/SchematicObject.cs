@@ -591,7 +591,10 @@ public class SchematicObject : MonoBehaviour
         {
             isAnimated = true;
             foreach (KeyValuePair<GameObject, RuntimeAnimatorController> pair in _animators)
+                {
                 pair.Key.AddComponent<Animator>().runtimeAnimatorController = pair.Value;
+                pair.Key.AddComponent<AnimatedPropertySync>();
+            }
         }
 
         _animators.Clear();

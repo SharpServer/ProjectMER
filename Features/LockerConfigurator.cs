@@ -1,5 +1,7 @@
 using Interactables.Interobjects.DoorUtils;
 using InventorySystem.Items.Pickups;
+using LabApiAmmoPickup = LabApi.Features.Wrappers.AmmoPickup;
+using LabApiPickup = LabApi.Features.Wrappers.Pickup;
 using ProjectMER.Features.Serializable;
 using ProjectMER.Features.Serializable.Lockers;
 using UnityEngine;
@@ -31,7 +33,7 @@ internal static class LockerConfigurator
 	/// <param name="locker">対象ロッカー。</param>
 	/// <param name="items">統一書式のアイテム指定リスト。</param>
 	/// <param name="shuffleChambers">true なら配置先チャンバーの順序をシャッフルする。</param>
-	public static void FillItems(LabApiLocker locker, IReadOnlyList<string> items, bool shuffleChambers = false)
+	public static void FillItems(LabApiLocker locker, IReadOnlyList<string> items, bool shuffleChambers = false, IReadOnlyList<int>? ammoPerItem = null)
 	{
 		List<LabApiLockerChamber> chambers = locker.Chambers.ToList();
 		if (chambers.Count == 0)
@@ -65,6 +67,8 @@ internal static class LockerConfigurator
 			}
 
 			chamber.Base.SpawnItem(itemType, 1);
+			if (ammoPerItem != null && index < ammoPerItem.Count)
+				ApplyAmmoToNewest(chamber, 1, ammoPerItem[index]);
 		}
 	}
 
@@ -153,7 +157,11 @@ internal static class LockerConfigurator
 					if (!TrySpawnCustomItemInChamber(chamber, entry.CustomItem))
 						Logger.Warn($"Cannot spawn custom locker loot '{entry.CustomItem}'. Check the Slafight class name.");
 			}
-			else chamber.Base.SpawnItem(entry.TargetItem, amount);
+			else
+			{
+				chamber.Base.SpawnItem(entry.TargetItem, amount);
+				ApplyAmmoToNewest(chamber, amount, entry.AmmoPerPickup);
+			}
 			remaining[selected]--;
 		}
 	}
@@ -195,6 +203,50 @@ internal static class LockerConfigurator
 
 		for (int i = 0; i < Math.Min(amount, chambers.Count); i++)
 			chambers[i].IsOpen = true;
+	}
+
+	/// <summary>
+	/// チャンバーへ最後に追加された count 個のうち弾薬ピックアップの弾数を ammo にする（LabAPI の AmmoPickup ラッパー経由）。
+	/// ammo が 0 以下なら何もしない（ゲーム既定）。初回開封まで未スポーンのピックアップにも、スポーン前に値が入る。
+	/// </summary>
+	public static void ApplyAmmoToNewest(LabApiLockerChamber chamber, int count, int ammo)
+	{
+		if (ammo <= 0 || count <= 0)
+			return;
+		List<ItemPickupBase> content = chamber.Base.Content.ToList();
+		for (int i = Math.Max(0, content.Count - count); i < content.Count; i++)
+			SetAmmo(content[i], ammo);
+	}
+
+	/// <summary>
+	/// ネイティブ抽選（ApplyLoot）で出た弾薬に、Loot の AmmoPerPickup を種類ごとに当てる。
+	/// 同じ弾薬の枠が複数あるときは、0 より大きい最初の枠の値を使う（ネイティブ抽選はどの枠が当たったかを残さないため）。
+	/// </summary>
+	public static void ApplyLootAmmo(LabApiLocker locker, IReadOnlyList<SerializableLockerLoot> loot)
+	{
+		Dictionary<ItemType, int> perType = new();
+		foreach (SerializableLockerLoot entry in loot)
+		{
+			if (entry.AmmoPerPickup > 0 && string.IsNullOrWhiteSpace(entry.CustomItem) && !perType.ContainsKey(entry.TargetItem))
+				perType[entry.TargetItem] = entry.AmmoPerPickup;
+		}
+		if (perType.Count == 0)
+			return;
+
+		foreach (LabApiLockerChamber chamber in locker.Chambers)
+		foreach (ItemPickupBase pickup in chamber.Base.Content.ToList())
+		{
+			if (pickup != null && perType.TryGetValue(pickup.Info.ItemId, out int ammo))
+				SetAmmo(pickup, ammo);
+		}
+	}
+
+	private static void SetAmmo(ItemPickupBase? pickupBase, int ammo)
+	{
+		if (pickupBase == null)
+			return;
+		if (LabApiPickup.Get(pickupBase) is LabApiAmmoPickup ammoPickup)
+			ammoPickup.Ammo = (ushort)Math.Min(ushort.MaxValue, Math.Max(1, ammo));
 	}
 
 	/// <summary>ロッカー内の Pickup の Rigidbody を物理有効に戻す。</summary>

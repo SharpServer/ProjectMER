@@ -24,4 +24,10 @@ public class SerializableLockerLoot
 	public int ProbabilityPoints { get; set; }
 
 	public int MinPerChamber { get; set; } = 1;
+
+	/// <summary>
+	/// 弾薬（Ammo*）の1ピックアップあたりの弾数。0 以下ならゲーム既定のまま。
+	/// Unity 側では値があるときだけ書き出す任意フィールド。
+	/// </summary>
+	public int AmmoPerPickup { get; set; }
 }

@@ -116,6 +116,8 @@ public class SerializableLocker : SerializableObject
 				LockerConfigurator.FillItems(labApiLocker, Items);
 			else if (useMixedLoot)
 				LockerConfigurator.FillMixedLoot(labApiLocker, Loot);
+			else if (Loot != null && Loot.Count > 0)
+				LockerConfigurator.ApplyLootAmmo(labApiLocker, Loot);
 
 			LockerConfigurator.UnfreezeContents(labApiLocker);
 

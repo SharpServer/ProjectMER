@@ -346,6 +346,12 @@ public class SchematicBlockData
 			LockerEventsHandler.RegisterInteractLock(locker);
 
 		List<string> items = Properties.GetStringList("Items");
+		// 任意: Items と同じ並びの弾数（0 はゲーム既定）。古いデータには無い。
+		List<int> itemsAmmo = Properties.GetList("ItemsAmmo").Select(value =>
+		{
+			try { return Convert.ToInt32(value); }
+			catch { return 0; }
+		}).ToList();
 		bool emptyContents = items.Count == 0 && Properties.GetBool("EmptyContents");
 		IReadOnlyList<object> lootData = Properties.GetList("Loot");
 		IReadOnlyList<object> chamberData = Properties.GetList("Chambers");
@@ -400,9 +406,11 @@ public class SchematicBlockData
 				return;
 
 			if (useSimpleItems)
-				LockerConfigurator.FillItems(labApiLocker, items, shuffleChambers);
+				LockerConfigurator.FillItems(labApiLocker, items, shuffleChambers, itemsAmmo);
 			else if (useMixedLoot)
 				LockerConfigurator.FillMixedLoot(labApiLocker, loot);
+			else if (lootData.Count > 0)
+				LockerConfigurator.ApplyLootAmmo(labApiLocker, loot);
 
 			LockerConfigurator.UnfreezeContents(labApiLocker);
 
@@ -439,7 +447,11 @@ public class SchematicBlockData
 				Math.Max(0, entry.GetInt("RemainingUses", 1)),
 				Math.Max(1, entry.GetInt("MaxPerChamber", 1)),
 				Math.Max(0, entry.GetInt("ProbabilityPoints", 100)),
-				Math.Max(0, entry.GetInt("MinPerChamber", 1))) { CustomItem = customItem.Trim() });
+				Math.Max(0, entry.GetInt("MinPerChamber", 1)))
+			{
+				CustomItem = customItem.Trim(),
+				AmmoPerPickup = Math.Max(0, entry.GetInt("AmmoPerPickup", 0)),
+			});
 		}
 
 		return loot;

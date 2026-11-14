@@ -25,6 +25,13 @@ public sealed class SchematicCustomHitbox : MonoBehaviour
     public SchematicObject Schematic { get; private set; } = null!;
     public IReadOnlyList<SchematicBlock> Blocks => _blocks;
     public IReadOnlyList<Collider> Colliders => _colliders;
+
+    /// <summary>
+    /// When set, hits bypass <see cref="Health"/> and go to this target, which also provides
+    /// <see cref="NetworkId"/>. Use it to let a model stand in for another destructible such as a player.
+    /// </summary>
+    public IDestructible? RedirectTarget { get; set; }
+
     public event Action<CustomHitboxDamagingEventArgs>? Damaging;
     public event Action<CustomHitboxDamagedEventArgs>? Damaged;
     public event Action<CustomHitboxDiedEventArgs>? Died;
@@ -33,6 +40,9 @@ public sealed class SchematicCustomHitbox : MonoBehaviour
     {
         get
         {
+            if (RedirectTarget != null)
+                return RedirectTarget.NetworkId;
+
             foreach (SchematicBlock block in _blocks)
             foreach (NetworkIdentity identity in block.GetComponentsInChildren<NetworkIdentity>(true))
                 if (identity != null && identity.netId != 0)
@@ -123,10 +133,17 @@ public sealed class SchematicCustomHitbox : MonoBehaviour
         if (!damaging.IsAllowed || damaging.Damage <= 0f || float.IsNaN(damaging.Damage) || float.IsInfinity(damaging.Damage))
             return false;
 
+        if (RedirectTarget != null)
+        {
+            if (!RedirectTarget.Damage(damaging.Damage, handler, hitPosition))
+                return false;
+
+            RaiseDamaged(damaging.Damage, handler, hitPosition);
+            return true;
+        }
+
         Health = Math.Max(0f, Health - damaging.Damage);
-        var damaged = new CustomHitboxDamagedEventArgs(this, damaging.Damage, handler, hitPosition);
-        Damaged?.Invoke(damaged);
-        Events.Handlers.CustomHitbox.OnDamaged(damaged);
+        RaiseDamaged(damaging.Damage, handler, hitPosition);
         if (Health <= 0f)
         {
             _dead = true;
@@ -136,6 +153,13 @@ public sealed class SchematicCustomHitbox : MonoBehaviour
         }
 
         return true;
+    }
+
+    private void RaiseDamaged(float damage, DamageHandlerBase handler, Vector3 hitPosition)
+    {
+        var damaged = new CustomHitboxDamagedEventArgs(this, damage, handler, hitPosition);
+        Damaged?.Invoke(damaged);
+        Events.Handlers.CustomHitbox.OnDamaged(damaged);
     }
 
     public void AddBlock(SchematicBlock block)

@@ -3,7 +3,10 @@ using InventorySystem.Items.Firearms.Modules;
 using InventorySystem.Items.Pickups;
 using LabApi.Features.Wrappers;
 using MEC;
+using ProjectMER.Events.Arguments;
+using ProjectMER.Events.Handlers;
 using ProjectMER.Events.Handlers.Internal;
+using ProjectMER.Features;
 using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Serializable;
 using UnityEngine;
@@ -13,7 +16,7 @@ namespace ProjectMER.Features.Objects;
 /// <summary>
 /// スキマティック内 Pickup ブロックのスポーナー。
 /// 統一 Item 指定（カスタムアイテム優先 → ItemType）と TriggerSpawn（プラグインからの出現制御）に対応する。
-/// スキマティック配置完了後（Start）に自動スポーンする（IsTriggerSpawn の場合は保留）。
+/// 所属スキマティックのブロック生成と物理同期後に自動スポーンする（IsTriggerSpawn の場合は保留）。
 /// </summary>
 public class SchematicPickupSpawner : MonoBehaviour
 {
@@ -24,6 +27,11 @@ public class SchematicPickupSpawner : MonoBehaviour
 	private ItemType _fallbackItemType = ItemType.None;
 	private string _rawItem = string.Empty;
 	private string _attachmentsCode = "-1";
+	private bool _hasAuthoredRigidbody;
+	private bool _authoredIsKinematic;
+	private bool _authoredUseGravity;
+	private RigidbodyConstraints _authoredConstraints;
+	private float _authoredMass = 1f;
 
 	/// <summary>使用回数（CustomItemPickupUses / PickupUsesLeft へ登録される）。</summary>
 	public int Uses { get; set; } = 1;
@@ -78,13 +86,67 @@ public class SchematicPickupSpawner : MonoBehaviour
 		Locked = locked;
 		_attachmentsCode = attachmentsCode;
 		IsTriggerSpawn = isTriggerSpawn;
+		Schematic.SchematicSpawned += OnSchematicSpawned;
 	}
 
-	private void Start()
+	private void OnSchematicSpawned(SchematicSpawnedEventArgs ev)
 	{
+		if (!ReferenceEquals(ev.Schematic, _schematic))
+			return;
+
+		Schematic.SchematicSpawned -= OnSchematicSpawned;
+		CaptureAuthoredPhysics();
 		if (!IsTriggerSpawn)
+			Timing.RunCoroutine(SpawnAfterSchematicReady());
+	}
+
+	private void CaptureAuthoredPhysics()
+	{
+		if (!TryGetComponent(out Rigidbody placeholderBody))
+			return;
+
+		// AddRigidbodies applies the schematic's per-block settings to the transform in
+		// ObjectFromId. For delayed items that transform is this proxy, not the real pickup.
+		// Preserve those authored settings for the real pickup and keep the empty proxy fixed.
+		_hasAuthoredRigidbody = true;
+		_authoredIsKinematic = placeholderBody.isKinematic;
+		_authoredUseGravity = placeholderBody.useGravity;
+		_authoredConstraints = placeholderBody.constraints;
+		_authoredMass = placeholderBody.mass;
+		placeholderBody.isKinematic = true;
+		placeholderBody.useGravity = false;
+	}
+
+	private void ApplyAuthoredPhysics(ItemPickupBase pickup)
+	{
+		if (!_hasAuthoredRigidbody)
+			return;
+
+		if (!pickup.TryGetComponent(out Rigidbody body))
+			body = pickup.gameObject.AddComponent<Rigidbody>();
+
+		body.isKinematic = _authoredIsKinematic;
+		body.useGravity = _authoredUseGravity;
+		body.constraints = _authoredConstraints;
+		body.mass = _authoredMass;
+	}
+
+	private IEnumerator<float> SpawnAfterSchematicReady()
+	{
+		// The owning SchematicObject can finish before ProjectMER finishes its staggered
+		// MapSchematic load. Keep the pickup out of physics until every map collider has
+		// been created, or a dynamic pickup can fall through the still-loading map.
+		while (MapUtils.IsAnyStaggeredLoadInProgress)
+			yield return Timing.WaitForOneFrame;
+
+		// Let Unity synchronize the completed colliders before enabling pickup physics.
+		yield return Timing.WaitForOneFrame;
+
+		if (this != null && !IsTriggerSpawn)
 			SpawnItems(clearExisting: false);
 	}
+
+	private void OnDestroy() => Schematic.SchematicSpawned -= OnSchematicSpawned;
 
 	/// <summary>
 	/// アイテムをスポーンする。カスタムアイテム優先 → ItemType の順で解決する。
@@ -103,9 +165,12 @@ public class SchematicPickupSpawner : MonoBehaviour
 		{
 			// ItemSpawnpoint と同じプロバイダ経由でカスタムアイテムを解決する
 			var syntheticSpawnpoint = new SerializableItemSpawnpoint();
-			if (ItemSpawnpointCustomItemRegistry.TrySpawn(_spec.Name, syntheticSpawnpoint, position, rotation, transform, out ItemPickupBase? customPickup) &&
+			Transform pickupParent = _schematic != null ? _schematic.transform : transform.parent;
+			if (ItemSpawnpointCustomItemRegistry.TrySpawn(_spec.Name, syntheticSpawnpoint, position, rotation, pickupParent, out ItemPickupBase? customPickup) &&
 			    customPickup != null)
 			{
+				ApplyAuthoredPhysics(customPickup);
+
 				_spawnedPickups.Add(customPickup);
 				PickupEventsHandler.CustomItemPickupUses[customPickup.Info.Serial] = new(_spec.Name, Uses);
 				RegisterButtonPickup(customPickup);
@@ -131,7 +196,8 @@ public class SchematicPickupSpawner : MonoBehaviour
 			return 0;
 
 		_spawnedPickups.Add(pickup.Base);
-		pickup.Base.transform.parent = transform;
+		pickup.Base.transform.SetParent(_schematic != null ? _schematic.transform : transform.parent, true);
+		ApplyAuthoredPhysics(pickup.Base);
 		PickupEventsHandler.PickupUsesLeft[pickup.Serial] = Uses;
 		RegisterButtonPickup(pickup.Base);
 		pickup.Spawn();

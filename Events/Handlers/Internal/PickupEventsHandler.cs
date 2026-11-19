@@ -19,6 +19,8 @@ public class PickupEventsHandler : CustomEventsHandler
 
 	public override void OnPlayerSearchingPickup(PlayerSearchingPickupEventArgs ev)
 	{
+		Logger.Debug($"PickupDiag Searching serial={ev.Pickup.Serial} type={ev.Pickup.Type} " +
+		             $"button={ButtonPickups.ContainsKey(ev.Pickup.Serial)} allowed={ev.IsAllowed}");
 		if (!ButtonPickups.TryGetValue(ev.Pickup.Serial, out SchematicObject schematic))
 			return;
 
@@ -28,6 +30,10 @@ public class PickupEventsHandler : CustomEventsHandler
 
 	public override void OnPlayerPickingUpItem(PlayerPickingUpItemEventArgs ev)
 	{
+		Logger.Debug($"PickupDiag PickingUp serial={ev.Pickup.Serial} type={ev.Pickup.Type} " +
+		             $"mapped={ev.Pickup.Transform.TryGetComponentInParent(out MapEditorObject _)} " +
+		             $"customUse={CustomItemPickupUses.ContainsKey(ev.Pickup.Serial)} " +
+		             $"usesLeft={PickupUsesLeft.ContainsKey(ev.Pickup.Serial)} allowed={ev.IsAllowed}");
 		if (!ev.Pickup.Transform.TryGetComponentInParent(out MapEditorObject _))
 			return;
 
@@ -88,11 +94,33 @@ public class PickupEventsHandler : CustomEventsHandler
 		if (!CustomItemPickupUses.TryGetValue(ev.Pickup.Serial, out CustomItemPickupUseInfo useInfo))
 			return false;
 
+		// A single-use custom pickup is already tracked by the custom item system under
+		// this pickup's serial. Let the game's normal pickup flow transfer that serial to
+		// inventory so its PickedUp callback (including the pickup hint) runs normally.
+		if (useInfo.UsesLeft <= 1)
+		{
+			CustomItemPickupUses.Remove(ev.Pickup.Serial);
+			PickupUsesLeft.Remove(ev.Pickup.Serial);
+			ButtonPickups.Remove(ev.Pickup.Serial);
+			return false;
+		}
+
+		// Game side keeps the pickup serial when it creates the inventory item
+		// (ItemSearchCompletor.Complete -> ServerAddItem(..., Info.Serial, ...)).
+		// Only cancel the vanilla pickup once the custom grant actually succeeded;
+		// otherwise nothing would be added and the pickup would stay in place,
+		// which looks like "can interact but cannot pick up".
+		if (!ItemSpawnpointCustomItemRegistry.TryGive(useInfo.CustomItemKey, ev.Pickup.Base, ev.Player))
+		{
+			CustomItemPickupUses.Remove(ev.Pickup.Serial);
+			ButtonPickups.Remove(ev.Pickup.Serial);
+			Logger.Warn($"Custom pickup '{useInfo.CustomItemKey}' (serial {ev.Pickup.Serial}) could not be granted; " +
+			            "falling back to vanilla pickup so the serial-based owner can adopt it.");
+			return false;
+		}
+
 		ev.IsAllowed = false;
 		ev.Pickup.IsInUse = false;
-
-		if (!ItemSpawnpointCustomItemRegistry.TryGive(useInfo.CustomItemKey, ev.Pickup.Base, ev.Player))
-			return true;
 
 		if (--useInfo.UsesLeft > 0)
 			return true;

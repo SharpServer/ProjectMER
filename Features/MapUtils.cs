@@ -36,6 +36,9 @@ public static class MapUtils
 
 	public static Dictionary<string, MapSchematic> LoadedMaps { get; private set; } = [];
 
+	/// <summary>True while one or more map schematics are still being loaded across frames.</summary>
+	internal static bool IsAnyStaggeredLoadInProgress => StaggeredLoads.Count > 0;
+
 	public static void SaveMap(string mapName)
 	{
 		if (mapName == UntitledMapName)

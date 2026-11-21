@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using MerText;
+using ProjectMER.Features.Extensions;
 
 namespace ProjectMER.Features;
 
@@ -21,6 +23,10 @@ public static class SchematicTextFormatting
         if (float.IsNaN(size) || float.IsInfinity(size) || size <= 0f ||
             float.IsNaN(factor) || float.IsInfinity(factor) || factor <= 0f) return text;
         bool rich = !properties.TryGetValue("RichText", out object? richValue) || Convert.ToBoolean(richValue);
+        TextPresentation presentation = ReadPresentation(properties);
+        if (!properties.ContainsKey("ImageGroup") && presentation.HasOverrides())
+            return TextSequenceTimeline.FormatHold(text, rich, size * factor, factor, presentation,
+                properties.GetFloat("StaticTextFitScale", 1f));
         if (rich)
             text = AbsoluteSize.Replace(text, match =>
             {
@@ -32,5 +38,21 @@ public static class SchematicTextFormatting
         else
             text = "<noparse>" + text + "</noparse>";
         return "<size=" + (size * factor).ToString("0.######", CultureInfo.InvariantCulture) + ">" + text + "</size>";
+    }
+
+    internal static TextPresentation ReadPresentation(Dictionary<string, object> properties)
+    {
+        if (!properties.TryGetValueSafe("StaticPresentation", out object raw) || raw.AsDictionary() is not { } style)
+            return new TextPresentation();
+
+        return new TextPresentation
+        {
+            LineMode = (TextLineMode)style.GetInt("LineMode"),
+            Alignment = (TextStepAlignment)style.GetInt("Alignment", (int)TextStepAlignment.PrefabDefault),
+            Color = style.GetString("Color"),
+            Bold = style.GetBool("Bold"),
+            CharacterSpacing = style.GetFloat("CharacterSpacing"),
+            BaselineOffset = style.GetFloat("BaselineOffset"),
+        };
     }
 }

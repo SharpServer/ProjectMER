@@ -274,6 +274,7 @@ public class SchematicBlockData
 
 		text.TextFormat = SchematicTextFormatting.ForNativeCanvas(Properties);
 		text.DisplaySize = Properties["DisplaySize"].ToVector2() * 20f;
+		SchematicTextAnimation.Attach(text, Properties);
 
 		return text.gameObject;
 	}

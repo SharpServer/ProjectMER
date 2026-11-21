@@ -1,7 +1,11 @@
 using System;
 using Interactables.Interobjects.DoorUtils;
 using LabApi.Features.Wrappers;
+using MapGeneration.Distributors;
+using MapGeneration.RoomConnectors;
 using Mirror;
+using ProjectMER.Features.Objects;
+using ProjectMER.Patches;
 using ProjectMER.Features.Enums;
 using ProjectMER.Features.Extensions;
 using UnityEngine;
@@ -15,36 +19,51 @@ public class SerializableDoor : SerializableObject
 	public bool IsLocked { get; set; } = false;
 	public DoorPermissionFlags RequiredPermissions { get; set; } = DoorPermissionFlags.None;
 	public bool RequireAll { get; set; } = true;
+	public string AccessDeniedMessage { get; set; } = string.Empty;
+	public string SecretCode { get; set; } = string.Empty;
 
 	public override GameObject SpawnOrUpdateObject(Room? room = null, GameObject? instance = null)
 	{
-		DoorVariant doorVariant;
 		Vector3 position = room.GetAbsolutePosition(Position);
 		Quaternion rotation = room.GetAbsoluteRotation(Rotation);
 		_prevIndex = Index;
 
 		if (instance == null)
-		{
-			doorVariant = GameObject.Instantiate(DoorPrefab);
-			if (doorVariant.TryGetComponent(out DoorRandomInitialStateExtension doorRandomInitialStateExtension))
-				GameObject.Destroy(doorRandomInitialStateExtension);
+			return SpawnAt(position, rotation);
 
-			doorVariant.transform.SetPositionAndRotation(position, rotation);
-			doorVariant.transform.localScale = Scale;
-			_prevType = DoorType;
-			SetupDoor(doorVariant);
-			NetworkServer.Spawn(doorVariant.gameObject);
+		DoorVariant doorVariant = instance.GetComponent<DoorVariant>();
+		doorVariant.transform.SetPositionAndRotation(position, rotation);
+		doorVariant.transform.localScale = Scale;
+		_prevType = DoorType;
+		SetupDoor(doorVariant);
+		if (doorVariant.TryGetComponent(out StructurePositionSync structure))
+		{
+			StructureTransformSync.Attach(structure);
+			NetworkServer.UnSpawn(instance);
+			NetworkServer.Spawn(instance);
 		}
 		else
 		{
-			doorVariant = instance.GetComponent<DoorVariant>();
-			doorVariant.transform.SetPositionAndRotation(position, rotation);
-			doorVariant.transform.localScale = Scale;
-			_prevType = DoorType;
-			SetupDoor(doorVariant);
 			SendTransformUpdate(doorVariant);
 		}
 
+		return instance;
+	}
+
+	internal GameObject SpawnAt(Vector3 position, Quaternion rotation, string? name = null)
+	{
+		DoorVariant doorVariant = GameObject.Instantiate(DoorPrefab, position, rotation);
+		if (doorVariant.TryGetComponent(out DoorRandomInitialStateExtension randomInitialState))
+			GameObject.Destroy(randomInitialState);
+		if (name != null)
+			doorVariant.gameObject.name = name;
+
+		doorVariant.transform.localScale = Scale;
+		if (doorVariant.TryGetComponent(out StructurePositionSync structure))
+			StructureTransformSync.Attach(structure);
+		_prevType = DoorType;
+		SetupDoor(doorVariant);
+		NetworkServer.Spawn(doorVariant.gameObject);
 		return doorVariant.gameObject;
 	}
 
@@ -53,6 +72,23 @@ public class SerializableDoor : SerializableObject
 		doorVariant.NetworkTargetState = IsOpen;
 		doorVariant.ServerChangeLock(DoorLockReason.SpecialDoorFeature, IsLocked);
 		doorVariant.RequiredPermissions = new DoorPermissionsPolicy(RequiredPermissions, RequireAll);
+		DoorAccessFeedback? feedback = doorVariant.GetComponent<DoorAccessFeedback>();
+		if (feedback == null && (!string.IsNullOrWhiteSpace(AccessDeniedMessage) || !string.IsNullOrEmpty(SecretCode)))
+			feedback = doorVariant.gameObject.AddComponent<DoorAccessFeedback>();
+		if (feedback != null)
+		{
+			feedback.DenialMessage = AccessDeniedMessage;
+			feedback.SecretCode = SecretCode;
+		}
+		byte? mask = DoorType switch
+		{
+			DoorType.Hcz => 3,
+			DoorType.HczOneSided => 1,
+			DoorType.HczTwoSided => 0,
+			_ => null,
+		};
+		if (mask.HasValue && doorVariant.TryGetComponent(out WallableSmallNodeRoomConnector connector))
+			SpawnedDoorWallConfiguration.Apply(connector, mask.Value);
 	}
 
 	private DoorVariant DoorPrefab
@@ -62,7 +98,7 @@ public class SerializableDoor : SerializableObject
 			DoorVariant prefab = DoorType switch
 			{
 				DoorType.Lcz => PrefabManager.DoorLcz,
-				DoorType.Hcz => PrefabManager.DoorHcz,
+				DoorType.Hcz or DoorType.HczOneSided or DoorType.HczTwoSided => PrefabManager.DoorHcz,
 				DoorType.Ez => PrefabManager.DoorEz,
 				DoorType.Bulkdoor => PrefabManager.DoorHeavyBulk,
 				DoorType.Gate => PrefabManager.DoorGate,

@@ -1,4 +1,5 @@
 using MEC;
+using MapGeneration.Distributors;
 using Mirror;
 using ProjectMER.Features.Serializable;
 using ProjectMER.Features.Serializable.Schematics;
@@ -12,7 +13,6 @@ public class SchematicDoorObject : MonoBehaviour
 
     public GameObject? DoorGameObject { get; private set; }
 
-    private SerializableDoor? _door;
     private CoroutineHandle _syncCoroutine;
     private Vector3 _lastPosition;
     private Quaternion _lastRotation;
@@ -20,7 +20,7 @@ public class SchematicDoorObject : MonoBehaviour
     internal void Init(SchematicDoorData data, SchematicObject schematic)
     {
         Schematic = schematic;
-        _door = new SerializableDoor
+        SerializableDoor door = new()
         {
             Position = Vector3.zero,
             Rotation = Vector3.zero,
@@ -30,11 +30,11 @@ public class SchematicDoorObject : MonoBehaviour
             IsLocked = data.IsLocked,
             RequiredPermissions = data.RequiredPermissions,
             RequireAll = data.RequireAll,
+            AccessDeniedMessage = data.AccessDeniedMessage,
+            SecretCode = data.SecretCode,
         };
 
-        DoorGameObject = _door.SpawnOrUpdateObject();
-        DoorGameObject.name = data.Name;
-        RespawnDoorAtMarker();
+        DoorGameObject = door.SpawnAt(transform.position, transform.rotation, data.Name);
         _lastPosition = transform.position;
         _lastRotation = transform.rotation;
         _syncCoroutine = Timing.RunCoroutine(SyncCoroutine());
@@ -44,21 +44,20 @@ public class SchematicDoorObject : MonoBehaviour
     {
         while (this != null && DoorGameObject != null)
         {
-            SyncDoorTransform(force: false);
+            SyncDoorTransform();
             yield return Timing.WaitForSeconds(0.05f);
         }
     }
 
-    private void SyncDoorTransform(bool force)
+    private void SyncDoorTransform()
     {
-        if (_door == null || DoorGameObject == null)
+        if (DoorGameObject == null)
             return;
 
         Vector3 position = transform.position;
         Quaternion rotation = transform.rotation;
 
-        if (!force &&
-            (position - _lastPosition).sqrMagnitude < 0.0001f &&
+        if ((position - _lastPosition).sqrMagnitude < 0.0001f &&
             Quaternion.Angle(rotation, _lastRotation) < 0.1f)
         {
             return;
@@ -77,7 +76,8 @@ public class SchematicDoorObject : MonoBehaviour
 
         NetworkServer.UnSpawn(DoorGameObject);
         DoorGameObject.transform.SetPositionAndRotation(transform.position, transform.rotation);
-        DoorGameObject.transform.localScale = Vector3.one;
+        if (DoorGameObject.TryGetComponent(out StructurePositionSync structure))
+            StructureTransformSync.Attach(structure);
         NetworkServer.Spawn(DoorGameObject);
     }
 

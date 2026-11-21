@@ -11,4 +11,6 @@ public enum DoorType
 	Bulkdoor = 3,
 	HeavyBulkDoor = 3,
 	Gate = 4,
+	HczOneSided = 5,
+	HczTwoSided = 6,
 }

@@ -27,6 +27,8 @@ public class SchematicDoorData
     public DoorPermissionFlags RequiredPermissions { get; set; } = DoorPermissionFlags.None;
 
     public bool RequireAll { get; set; } = true;
+    public string AccessDeniedMessage { get; set; } = string.Empty;
+    public string SecretCode { get; set; } = string.Empty;
 }
 
 public class SchematicDoorJsonData
@@ -52,6 +54,8 @@ public class SchematicDoorJsonData
     public int RequiredPermissions { get; set; }
 
     public bool RequireAll { get; set; } = true;
+    public string AccessDeniedMessage { get; set; } = string.Empty;
+    public string SecretCode { get; set; } = string.Empty;
 
     public SchematicDoorData ToDoorData() => new()
     {
@@ -66,5 +70,7 @@ public class SchematicDoorJsonData
         IsLocked = IsLocked,
         RequiredPermissions = (DoorPermissionFlags)RequiredPermissions,
         RequireAll = RequireAll,
+        AccessDeniedMessage = AccessDeniedMessage,
+        SecretCode = SecretCode,
     };
 }

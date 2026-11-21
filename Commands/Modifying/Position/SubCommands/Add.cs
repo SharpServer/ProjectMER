@@ -39,7 +39,13 @@ public class Add : ICommand
 			return false;
 		}
 
-		if (!ToolGunHandler.TryGetSelectedMapObject(player, out MapEditorObject mapEditorObject))
+		IReadOnlyList<MapEditorObject> selection = ToolGunHandler.GetSelection(player);
+		if (selection.Any(obj => Grab.IsGrabbing(obj.Base)))
+		{
+			response = "Release the grabbed objects before moving them.";
+			return false;
+		}
+		if (selection.Count == 0)
 		{
 			response = "You need to select an object first!";
 			return false;
@@ -47,10 +53,16 @@ public class Add : ICommand
 
 		if (arguments.Count >= 3 && TryGetVector(arguments.At(0), arguments.At(1), arguments.At(2), out Vector3 newPosition))
 		{
-			mapEditorObject.Base.Position += newPosition;
-			mapEditorObject.UpdateObjectAndCopies();
+			EditorHistory.State[] before = selection.Select(EditorHistory.Capture).ToArray();
+			if (selection.Count == 1)
+			{
+				selection[0].Base.Position += newPosition;
+				selection[0].UpdateObjectAndCopies();
+			}
+			else SelectionPosition.Translate(selection, newPosition);
 
-			response = mapEditorObject.Base.Position.ToString("F3");
+			EditorHistory.RecordEdit(player, "move", "mpr.position", before);
+			response = SelectionPosition.Describe(selection);
 			return true;
 		}
 

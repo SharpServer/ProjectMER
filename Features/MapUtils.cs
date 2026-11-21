@@ -2,6 +2,7 @@ using MEC;
 using ProjectMER.Features.Objects;
 using ProjectMER.Features.Serializable;
 using ProjectMER.Features.Serializable.Schematics;
+using ProjectMER.Features.ToolGun;
 using Utf8Json;
 using YamlDotNet.Core;
 
@@ -74,6 +75,7 @@ public static class MapUtils
 
 		if (!isLoaded)
 			LoadedMaps.Add(mapName, map);
+		EditorHistory.RebaseMap(untitledMap, map);
 	}
 
 	public static void LoadMap(string mapName)
@@ -159,16 +161,18 @@ public static class MapUtils
 			StaggeredLoads.Remove(mapName);
 		}
 
-		if (!LoadedMaps.ContainsKey(mapName))
+		if (!LoadedMaps.TryGetValue(mapName, out MapSchematic? unloadedMap))
 			return false;
 
-		foreach (MapEditorObject mapEditorObject in LoadedMaps[mapName].SpawnedObjects)
+		foreach (MapEditorObject mapEditorObject in unloadedMap.SpawnedObjects)
 		{
 			if (mapEditorObject != null)
 				mapEditorObject.Destroy();
 		}
 
 		LoadedMaps.Remove(mapName);
+		EditorHistory.ForgetMap(unloadedMap);
+		ToolGunHandler.RefreshSelections();
 		return true;
 	}
 

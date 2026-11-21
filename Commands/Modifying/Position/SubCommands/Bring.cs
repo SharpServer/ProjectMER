@@ -18,7 +18,7 @@ public class Bring : ICommand
 	public string[] Aliases { get; } = [];
 
 	/// <inheritdoc/>
-	public string Description => "Brings an object to player's position.";
+	public string Description => "Brings the selected objects to the player using the primary object as the anchor.";
 
 	/// <inheritdoc/>
 	public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
@@ -36,16 +36,22 @@ public class Bring : ICommand
 			return false;
 		}
 
-		if (!ToolGunHandler.TryGetSelectedMapObject(player, out MapEditorObject mapEditorObject))
+		IReadOnlyList<MapEditorObject> selection = ToolGunHandler.GetSelection(player);
+		if (selection.Any(obj => Grab.IsGrabbing(obj.Base)))
+		{
+			response = "Release the grabbed objects before moving them.";
+			return false;
+		}
+		if (selection.Count == 0)
 		{
 			response = "You need to select an object first!";
 			return false;
 		}
 
-		mapEditorObject.Base.Position = mapEditorObject.Room.Transform.InverseTransformPoint(player.Position);
-		mapEditorObject.UpdateObjectAndCopies();
-
-		response = mapEditorObject.Base.Position.ToString("F3");
+		EditorHistory.State[] before = selection.Select(EditorHistory.Capture).ToArray();
+		SelectionPosition.Translate(selection, player.Position - SelectionPosition.WorldPosition(selection[0]));
+		EditorHistory.RecordEdit(player, "bring", "mpr.position", before);
+		response = SelectionPosition.Describe(selection);
 		return true;
 	}
 }

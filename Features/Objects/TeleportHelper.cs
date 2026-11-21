@@ -33,13 +33,16 @@ internal static class TeleportHelper
 		boxCollider.size = size;
 	}
 
+	internal static bool IsTriggerEnabled(BoxCollider? trigger) => trigger != null && trigger.enabled;
+
 	/// <summary>
 	/// Runs one detection pass for a teleporter. Call from <c>FixedUpdate</c>.
 	/// </summary>
 	public static void Tick(ITeleporter source)
 	{
 		BoxCollider? trigger = source.Trigger;
-		if (trigger == null)
+		// The editor disables colliders on grabbed objects. The polling detector must honor that too.
+		if (!IsTriggerEnabled(trigger))
 			return;
 
 		HashSet<uint> ignoredPlayers = source.IgnoredPlayers;
@@ -54,7 +57,7 @@ internal static class TeleportHelper
 
 			uint hubId = hub.netId;
 
-			if (player.RoleBase is not IFpcRole fpcRole || !IsInside(trigger, player, fpcRole))
+			if (player.RoleBase is not IFpcRole fpcRole || !IsInside(trigger!, player, fpcRole))
 			{
 				// Keep the arrival hold for the whole cooldown. The server-side motor can briefly
 				// correct a freshly teleported player back into the destination trigger on a later

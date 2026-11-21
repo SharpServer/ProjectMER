@@ -1,10 +1,8 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using CommandSystem;
 using LabApi.Features.Permissions;
 using LabApi.Features.Wrappers;
 using MEC;
+using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Objects;
 using ProjectMER.Features.Serializable;
 using ProjectMER.Features.ToolGun;
@@ -12,205 +10,172 @@ using UnityEngine;
 
 namespace ProjectMER.Commands.Modifying.Position.SubCommands;
 
-/// <summary>
-/// Grabs a specific <see cref="MapEditorObject"/>.
-/// </summary>
 public class Grab : ICommand
 {
-	public string Command => "grab";
+    public string Command => "grab";
+    public string[] Aliases => [];
+    public string Description => "Grabs or releases the selected objects as a group.";
 
-	public string[] Aliases => [];
+    private static readonly Dictionary<Player, GrabSession> Sessions = [];
 
-	public string Description => "Grabs an object.";
+    internal static IReadOnlyList<MapEditorObject> GetGrabbedObjects(Player player) =>
+        Sessions.TryGetValue(player, out GrabSession? session) ? session.Objects : [];
 
-	public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
-	{
-		if (!sender.HasAnyPermission($"mpr.position"))
-		{
-			response = $"You don't have permission to execute this command. Required permission: mpr.position";
-			return false;
-		}
+    internal static bool IsGrabbing(SerializableObject data) =>
+        Sessions.Values.Any(session => session.Before.Any(state => ReferenceEquals(state.Data, data)));
 
-		Player? player = Player.Get(sender);
-		if (player is null)
-		{
-			response = "This command can't be run from the server console.";
-			return false;
-		}
+    public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
+    {
+        if (!sender.HasAnyPermission("mpr.position"))
+        {
+            response = "You don't have permission to execute this command. Required permission: mpr.position";
+            return false;
+        }
 
-		if (!ToolGunHandler.TryGetSelectedMapObject(player, out MapEditorObject mapEditorObject))
-		{
-			response = "You need to select an object first!";
-			return false;
-		}
+        Player? player = Player.Get(sender);
+        if (player is null)
+        {
+            response = "This command can't be run from the server console.";
+            return false;
+        }
 
-		if (GrabbingPlayers.ContainsKey(player))
-		{
-			Timing.KillCoroutines(GrabbingPlayers[player]);
-			GrabbingPlayers.Remove(player);
-			RestorePhysicsState(player);
+        if (Stop(player))
+        {
+            response = "Ungrabbed.";
+            return true;
+        }
 
-			UpdateSerializedPosition(mapEditorObject, mapEditorObject.transform.position);
-			mapEditorObject.UpdateObjectAndCopies();
+        IReadOnlyList<MapEditorObject> selection = ToolGunHandler.GetSelection(player);
+        if (selection.Count == 0)
+        {
+            response = "You need to select an object first!";
+            return false;
+        }
 
-			response = "Ungrabbed";
-			return true;
-		}
+        if (Sessions.Values.Any(session => session.Objects.Any(existing =>
+            selection.Any(obj => ReferenceEquals(obj.Base, existing.Base)))))
+        {
+            response = "Another player is already grabbing one of the selected objects.";
+            return false;
+        }
 
-		DisablePhysicsState(player, mapEditorObject);
-		GrabbingPlayers.Add(player, Timing.RunCoroutine(GrabbingCoroutine(player, mapEditorObject)));
+        GrabSession grab = new(selection);
+        Sessions.Add(player, grab);
+        grab.Handle = Timing.RunCoroutine(Move(player, grab));
+        response = $"Grabbed {selection.Count} object(s). Run mer pos grab again to release.";
+        return true;
+    }
 
-		response = "Grabbed";
-		return true;
-	}
+    internal static bool Stop(Player player, bool commit = true)
+    {
+        if (!Sessions.TryGetValue(player, out GrabSession? session))
+            return false;
+        Sessions.Remove(player);
+        Timing.KillCoroutines(session.Handle);
+        session.Finish(player, commit);
+        return true;
+    }
 
-	private IEnumerator<float> GrabbingCoroutine(Player player, MapEditorObject mapEditorObject)
-	{
-		Vector3 position = player.Camera.position;
-		float multiplier = Vector3.Distance(position, mapEditorObject.transform.position);
-		Vector3 prevPos = position + (player.Camera.forward * multiplier);
+    internal static void StopAll()
+    {
+        foreach (Player player in Sessions.Keys.ToArray())
+            Stop(player, commit: false);
+    }
 
-		try
-		{
-			while (true)
-			{
-				yield return Timing.WaitForSeconds(0.02f);
+    private static IEnumerator<float> Move(Player player, GrabSession grab)
+    {
+        float distance = Vector3.Distance(player.Camera.position, grab.Origins[0]);
+        Vector3 GetPointer() => player.Camera.position + player.Camera.forward * distance;
+        Vector3 start = GetPointer();
+        Vector3 previous = start;
 
-				if (mapEditorObject == null || !ToolGunHandler.TryGetSelectedMapObject(player, out _))
-					break;
+        try
+        {
+            while (true)
+            {
+                yield return Timing.WaitForSeconds(0.02f);
+                IReadOnlyList<MapEditorObject> selected = ToolGunHandler.GetSelection(player);
+                if (!selected.SequenceEqual(grab.Objects) || grab.Objects.Any(obj => !SelectionPosition.IsLive(obj)))
+                    break;
 
-				Vector3 newPos = player.Camera.position + (player.Camera.forward * multiplier);
+                Vector3 pointer = GetPointer();
+                if ((previous - pointer).sqrMagnitude < 0.0001f)
+                    continue;
 
-				if ((prevPos - newPos).sqrMagnitude < 0.0001f)
-					continue;
+                previous = pointer;
+                Vector3 delta = pointer - start;
+                for (int i = 0; i < grab.Objects.Length; i++)
+                {
+                    MapEditorObject obj = grab.Objects[i];
+                    Vector3 position = grab.Origins[i] + delta;
+                    obj.transform.position = position;
+                    obj.Base.Position = obj.Room.GetRelativePosition(position);
+                    obj.Map.IsDirty = true;
+                    if (obj.Base is SerializableDoor)
+                        obj.Base.SpawnOrUpdateObject(obj.Room, obj.gameObject);
+                }
+                Physics.SyncTransforms();
+            }
+        }
+        finally
+        {
+            if (Sessions.TryGetValue(player, out GrabSession? current) && ReferenceEquals(current, grab))
+            {
+                Sessions.Remove(player);
+                grab.Finish(player, commit: true);
+            }
+        }
+    }
 
-				prevPos = newPos;
-				MoveGrabbedObject(mapEditorObject, prevPos);
-			}
-		}
-		finally
-		{
-			GrabbingPlayers.Remove(player);
-			RestorePhysicsState(player);
-			if (mapEditorObject != null)
-			{
-				UpdateSerializedPosition(mapEditorObject, mapEditorObject.transform.position);
-				mapEditorObject.UpdateObjectAndCopies();
-			}
-		}
-	}
+    private sealed class GrabSession
+    {
+        internal readonly MapEditorObject[] Objects;
+        internal readonly Vector3[] Origins;
+        internal readonly EditorHistory.State[] Before;
+        internal CoroutineHandle Handle;
+        private readonly (Collider Collider, bool Enabled)[] _colliders;
+        private readonly (Rigidbody Body, bool IsKinematic, bool DetectCollisions)[] _bodies;
 
-	private static void MoveGrabbedObject(MapEditorObject mapEditorObject, Vector3 worldPosition)
-	{
-		mapEditorObject.transform.position = worldPosition;
-		UpdateSerializedPosition(mapEditorObject, worldPosition);
-		if (mapEditorObject.Base is SerializableDoor)
-			mapEditorObject.Base.SpawnOrUpdateObject(mapEditorObject.Room, mapEditorObject.gameObject);
+        internal GrabSession(IReadOnlyList<MapEditorObject> selection)
+        {
+            Objects = selection.ToArray();
+            Origins = Objects.Select(obj => obj.transform.position).ToArray();
+            Before = Objects.Select(EditorHistory.Capture).ToArray();
+            _colliders = Objects.SelectMany(obj => obj.GetComponentsInChildren<Collider>(true))
+                .Distinct().Select(collider => (collider, collider.enabled)).ToArray();
+            _bodies = Objects.SelectMany(obj => obj.GetComponentsInChildren<Rigidbody>(true))
+                .Distinct().Select(body => (body, body.isKinematic, body.detectCollisions)).ToArray();
 
-		Physics.SyncTransforms();
-	}
+            foreach (var (collider, _) in _colliders)
+                collider.enabled = false;
+            foreach (var (body, _, _) in _bodies)
+            {
+                body.isKinematic = true;
+                body.detectCollisions = false;
+            }
+            Physics.SyncTransforms();
+        }
 
-	private static void UpdateSerializedPosition(MapEditorObject mapEditorObject, Vector3 worldPosition)
-	{
-		Room room = mapEditorObject.Room;
-		mapEditorObject.Base.Position = room.Name == MapGeneration.RoomName.Outside
-			? worldPosition
-			: room.Transform.InverseTransformPoint(worldPosition);
-	}
+        internal void Finish(Player player, bool commit)
+        {
+            foreach (var (collider, enabled) in _colliders)
+                if (collider != null) collider.enabled = enabled;
+            foreach (var (body, kinematic, collisions) in _bodies)
+            {
+                if (body == null) continue;
+                body.isKinematic = kinematic;
+                body.detectCollisions = collisions;
+            }
+            Physics.SyncTransforms();
+            if (!commit) return;
 
-	/// <summary>
-	/// The <see cref="Dictionary{TKey, TValue}"/> which contains all <see cref="Player"/> and <see cref="CoroutineHandle"/> pairs.
-	/// </summary>
-	private static readonly Dictionary<Player, CoroutineHandle> GrabbingPlayers = [];
-	private static readonly Dictionary<Player, GrabPhysicsState> PhysicsStates = [];
-
-	private static void DisablePhysicsState(Player player, MapEditorObject mapEditorObject)
-	{
-		RestorePhysicsState(player);
-
-		var colliders = mapEditorObject.GetComponentsInChildren<Collider>(true);
-		var rigidbodies = mapEditorObject.GetComponentsInChildren<Rigidbody>(true);
-
-		var state = new GrabPhysicsState(
-			colliders.Select(c => new ColliderState(c, c.enabled)).ToArray(),
-			rigidbodies.Select(r => new RigidbodyState(r, r.isKinematic, r.detectCollisions)).ToArray());
-
-		foreach (Collider collider in colliders)
-			collider.enabled = false;
-
-		foreach (Rigidbody rigidbody in rigidbodies)
-		{
-			rigidbody.isKinematic = true;
-			rigidbody.detectCollisions = false;
-		}
-
-		PhysicsStates[player] = state;
-		Physics.SyncTransforms();
-	}
-
-	private static void RestorePhysicsState(Player player)
-	{
-		if (!PhysicsStates.TryGetValue(player, out GrabPhysicsState state))
-			return;
-
-		foreach (ColliderState colliderState in state.Colliders)
-		{
-			if (colliderState.Collider != null)
-				colliderState.Collider.enabled = colliderState.Enabled;
-		}
-
-		foreach (RigidbodyState rigidbodyState in state.Rigidbodies)
-		{
-			if (rigidbodyState.Rigidbody != null)
-			{
-				rigidbodyState.Rigidbody.isKinematic = rigidbodyState.IsKinematic;
-				rigidbodyState.Rigidbody.detectCollisions = rigidbodyState.DetectCollisions;
-			}
-		}
-
-		PhysicsStates.Remove(player);
-		Physics.SyncTransforms();
-	}
-
-	private readonly struct GrabPhysicsState
-	{
-		public GrabPhysicsState(ColliderState[] colliders, RigidbodyState[] rigidbodies)
-		{
-			Colliders = colliders;
-			Rigidbodies = rigidbodies;
-		}
-
-		public ColliderState[] Colliders { get; }
-
-		public RigidbodyState[] Rigidbodies { get; }
-	}
-
-	private readonly struct ColliderState
-	{
-		public ColliderState(Collider collider, bool enabled)
-		{
-			Collider = collider;
-			Enabled = enabled;
-		}
-
-		public Collider Collider { get; }
-
-		public bool Enabled { get; }
-	}
-
-	private readonly struct RigidbodyState
-	{
-		public RigidbodyState(Rigidbody rigidbody, bool isKinematic, bool detectCollisions)
-		{
-			Rigidbody = rigidbody;
-			IsKinematic = isKinematic;
-			DetectCollisions = detectCollisions;
-		}
-
-		public Rigidbody Rigidbody { get; }
-
-		public bool IsKinematic { get; }
-
-		public bool DetectCollisions { get; }
-	}
+            EditorHistory.RecordEdit(player, "grab", "mpr.position", Before.Where(state =>
+                ReferenceEquals(state.Map.FindElement(state.Id), state.Data)));
+            foreach (MapEditorObject obj in Objects)
+            {
+                if (SelectionPosition.IsLive(obj))
+                    obj.UpdateObjectAndCopies();
+            }
+        }
+    }
 }

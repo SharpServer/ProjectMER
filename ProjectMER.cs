@@ -148,6 +148,7 @@ public class ProjectMER : Plugin<Config>
 
 	public override void Disable()
 	{
+		Events.Handlers.Internal.GenericEventsHandler.ClearEditorState();
 		CullingManager.Stop();
 		// Plugin hot-unload is rare, but surviving schematics must remain valid after our
 		// client-only IDs disappear. Restore native objects even if this is a one-time burst.

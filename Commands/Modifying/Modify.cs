@@ -88,6 +88,11 @@ public class Modify : ICommand
 		}
 
 		string propertyName = arguments.At(0).ToUpperInvariant();
+		if (global::ProjectMER.Commands.Modifying.Position.SubCommands.Grab.IsGrabbing(mapEditorObject.Base))
+		{
+			response = "Release the grabbed object before modifying it.";
+			return false;
+		}
 		if (propertyName.Contains("MAP"))
 			return HandleMap(out response);
 		else if (propertyName == "ID")
@@ -104,6 +109,7 @@ public class Modify : ICommand
 		if (foundProperty.Name == nameof(SerializableObject.Room))
 			return HandleRoom(out response);
 
+		EditorHistory.State before = EditorHistory.Capture(mapEditorObject);
 		bool result;
 		if (typeof(IDictionary).IsAssignableFrom(foundProperty.PropertyType))
 			result = HandleDictionary(out response);
@@ -114,9 +120,14 @@ public class Modify : ICommand
 		else result = HandleString(out response);
 
 		if (!result)
+		{
+			if (typeof(ICollection).IsAssignableFrom(foundProperty.PropertyType))
+				EditorHistory.Restore(before);
 			return false;
+		}
 
 		mapEditorObject.UpdateObjectAndCopies();
+		EditorHistory.RecordEdit(player, "property edit", "mpr.modify", [before]);
 		response = "You've successfully modified the object!";
 		return true;
 
@@ -144,23 +155,20 @@ public class Modify : ICommand
 				return false;
 			}
 
-			MapSchematic oldMap = mapEditorObject.Map;
-			if (!MapUtils.LoadedMaps.TryGetValue(newMapName, out MapSchematic newMap)) // Map is already loaded
-				if (!MapUtils.TryGetMapData(newMapName, out newMap)) // Map isn't loaded but map file exists
-				{ // Map isn't loaded and map file doesn't exist
-
+			if (!MapUtils.LoadedMaps.TryGetValue(newMapName, out MapSchematic? newMap))
+			{
+				if (MapUtils.TryGetMapData(newMapName, out newMap))
+				{
+					MapUtils.LoadMap(newMapName);
+					newMap = MapUtils.LoadedMaps[newMapName];
+				}
+				else
+				{
 					newMap = new MapSchematic(newMapName);
 					MapUtils.LoadedMaps.Add(newMapName, newMap);
 				}
-
-
-			oldMap.TryRemoveElement(mapEditorObject.Id);
-			newMap.TryAddElement(mapEditorObject.Id, mapEditorObject.Base);
-
-			oldMap.Reload();
-			newMap.Reload();
-			response = "You've successfully modified the object's map!";
-			return true;
+			}
+			return EditorHistory.Relocate(player, mapEditorObject, newMap, mapEditorObject.Id, "object map", out response);
 		}
 
 		bool HandleId(out string response)
@@ -173,17 +181,7 @@ public class Modify : ICommand
 
 			string newId = arguments.At(1);
 
-			if (mapEditorObject.Map.SpawnedObjects.Any(x => x.Id == newId))
-			{
-				response = $"This ID is already used by an other object!";
-				return false;
-			}
-
-			mapEditorObject.Map.TryAddElement(newId, mapEditorObject.Base);
-			mapEditorObject.Map.TryRemoveElement(mapEditorObject.Id);
-			mapEditorObject.Map.Reload();
-			response = "You've successfully modified the object's ID!";
-			return true;
+			return EditorHistory.Relocate(player, mapEditorObject, mapEditorObject.Map, newId, "object ID", out response);
 		}
 
 		bool HandleRoom(out string response)
@@ -195,6 +193,7 @@ public class Modify : ICommand
 			}
 
 			Vector3 worldPosition = mapEditorObject.transform.position;
+			EditorHistory.State roomBefore = EditorHistory.Capture(mapEditorObject);
 			Quaternion worldRotation = mapEditorObject.transform.rotation;
 			string previousRoom = mapEditorObject.Base.Room;
 			string newRoom = string.Join(" ", arguments.Skip(1));
@@ -242,8 +241,9 @@ public class Modify : ICommand
 				.OrderBy(obj => (obj.transform.position - worldPosition).sqrMagnitude)
 				.FirstOrDefault();
 			if (replacement is not null)
-				ToolGunHandler.SelectObject(player, replacement);
+				ToolGunHandler.ReplaceSelectedInstance(player, replacement);
 
+			EditorHistory.RecordEdit(player, "room change", "mpr.modify", [roomBefore]);
 			response = "You've successfully modified the object's room and converted its position and rotation!";
 			return true;
 		}

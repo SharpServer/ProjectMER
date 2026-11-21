@@ -60,7 +60,8 @@ public class SchematicTeleportObject : MonoBehaviour, ITeleporter
 
             foreach (SchematicTeleportObject teleportObject in Instances)
             {
-                if (teleportObject == this || teleportObject.Id != targetId)
+                if (teleportObject == this || teleportObject.Id != targetId ||
+                    !TeleportHelper.IsTriggerEnabled(teleportObject._trigger))
                     continue;
 
                 return teleportObject;

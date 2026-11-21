@@ -98,6 +98,7 @@ public class Create : ICommand
 
 			if (Config.AutoSelect && player is not null)
 				ToolGunHandler.SelectObject(player, createdObject);
+			ToolGunHandler.RecordCreation(player, createdObject);
 
 			response = $"{objectName} has been successfully spawned!";
 			return true;
@@ -122,6 +123,7 @@ public class Create : ICommand
 
 		if (Config.AutoSelect && player is not null)
 			ToolGunHandler.SelectObject(player, schematicObject);
+		ToolGunHandler.RecordCreation(player, schematicObject);
 
 		response = $"{objectName} has been successfully spawned!";
 		return true;
@@ -171,6 +173,7 @@ public class Create : ICommand
 			marker.Options[option.Key] = option.Value;
 
 		createdObject.UpdateObjectAndCopies();
+		ToolGunHandler.RecordCreation(player, createdObject);
 
 		if (Config.AutoSelect && player is not null)
 			ToolGunHandler.SelectObject(player, createdObject);

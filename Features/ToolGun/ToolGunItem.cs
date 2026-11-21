@@ -129,7 +129,7 @@ public class ToolGunItem
 
 		if (ToolGunHandler.TryGetMapObject(player, out MapEditorObject mapEditorObject) && DeleteMode)
 		{
-			ToolGunHandler.DeleteObject(mapEditorObject);
+			ToolGunHandler.DeleteObjects([mapEditorObject], player);
 			return;
 		}
 

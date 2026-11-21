@@ -2,6 +2,7 @@
 using CommandSystem;
 using LabApi.Features.Permissions;
 using LabApi.Features.Wrappers;
+using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Objects;
 using ProjectMER.Features.ToolGun;
 using UnityEngine;
@@ -39,7 +40,13 @@ public class Set : ICommand
 			return false;
 		}
 
-		if (!ToolGunHandler.TryGetSelectedMapObject(player, out MapEditorObject mapEditorObject))
+		IReadOnlyList<MapEditorObject> selection = ToolGunHandler.GetSelection(player);
+		if (selection.Any(obj => Grab.IsGrabbing(obj.Base)))
+		{
+			response = "Release the grabbed objects before moving them.";
+			return false;
+		}
+		if (selection.Count == 0)
 		{
 			response = "You need to select an object first!";
 			return false;
@@ -47,10 +54,17 @@ public class Set : ICommand
 
 		if (arguments.Count >= 3 && TryGetVector(arguments.At(0), arguments.At(1), arguments.At(2), out Vector3 newPosition))
 		{
-			mapEditorObject.Base.Position = newPosition;
-			mapEditorObject.UpdateObjectAndCopies();
+			EditorHistory.State[] before = selection.Select(EditorHistory.Capture).ToArray();
+			MapEditorObject primary = selection[0];
+			if (selection.Count == 1)
+			{
+				primary.Base.Position = newPosition;
+				primary.UpdateObjectAndCopies();
+			}
+			else SelectionPosition.Translate(selection, primary.Room.GetAbsolutePosition(newPosition) - SelectionPosition.WorldPosition(primary));
 
-			response = mapEditorObject.Base.Position.ToString("F3");
+			EditorHistory.RecordEdit(player, "move", "mpr.position", before);
+			response = SelectionPosition.Describe(selection);
 			return true;
 		}
 

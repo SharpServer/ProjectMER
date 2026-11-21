@@ -38,19 +38,18 @@ public class MapEditorObject : MonoBehaviour
 		if (Base.RequiresReloading)
 		{
 			Base._prevIndex = Base.Index;
-			Player? player = ToolGunHandler.PlayerSelectedObjectDict.FirstOrDefault(x => x.Value.Id == Id).Key;
-
-			if (MapUtils.LoadedMaps.TryGetValue(MapName, out MapSchematic map))
-			{
-				map.DestroyObject(Id);
-			}
+			MapSchematic map = Map;
+			string id = Id;
+			SerializableObject data = Base;
+			map.DestroyObject(id);
 
 			Timing.CallDelayed(0.1f, () =>
 			{
-				map.SpawnObject(Id, Base);
-
-				if (player is not null)
-					ToolGunHandler.SelectObject(player, Map.SpawnedObjects.Find(x => x.Id == Id));
+				if (!MapUtils.LoadedMaps.TryGetValue(map.Name, out MapSchematic? current) || !ReferenceEquals(current, map) ||
+					!ReferenceEquals(map.FindElement(id), data) || map.SpawnedObjects.Any(obj => obj != null && obj.Id == id))
+					return;
+				map.SpawnObject(id, data);
+				ToolGunHandler.RefreshSelections();
 			});
 
 			return;
@@ -58,7 +57,7 @@ public class MapEditorObject : MonoBehaviour
 
 		foreach (MapEditorObject copy in Map.SpawnedObjects.ToList())
 		{
-			if (copy.Id != Id)
+			if (copy == null || copy.Id != Id)
 				continue;
 
 			copy.UpdateCopy();

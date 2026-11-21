@@ -22,7 +22,7 @@ public class Position : ParentCommand
 	public override string[] Aliases { get; } = ["pos"];
 
 	/// <inheritdoc/>
-	public override string Description => "Modifies object's posistion.";
+	public override string Description => "Moves the current selection, keeping offsets between selected objects.";
 
 	/// <inheritdoc/>
 	public override void LoadGeneratedCommands()
@@ -50,8 +50,8 @@ public class Position : ParentCommand
 		}
 
 		response = "\nUsage:\n";
-		response += "mp position set (x) (y) (z)\n";
-		response += "mp position add (x) (y) (z)\n";
+		response += "mp position set (x) (y) (z) - primary object's room-local position\n";
+		response += "mp position add (x) (y) (z) - world axes for multiple objects\n";
 		response += "mp position bring\n";
 		response += "mp position grab";
 

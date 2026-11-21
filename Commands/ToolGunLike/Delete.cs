@@ -15,7 +15,7 @@ public class Delete : ICommand
 	public string[] Aliases { get; } = ["del", "remove", "rm"];
 
 	/// <inheritdoc/>
-	public string Description => "Deletes the object which you are looking at.";
+	public string Description => "Deletes the aimed object, an ID, or the entire selection (remove selected).";
 
 	public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
 	{
@@ -35,26 +35,35 @@ public class Delete : ICommand
 		if (arguments.Count > 0)
 		{
 			string id = arguments.At(0);
+			if (id.Equals("selected", StringComparison.OrdinalIgnoreCase) && arguments.Count == 1)
+				return Remove(ToolGunHandler.GetSelection(player), player, out response);
 			if (ToolGunHandler.TryGetObjectById(id, out MapEditorObject idObject))
-			{
-				ToolGunHandler.DeleteObject(idObject);
-				response = "You've successfully deleted the object!";
-				return true;
-			}
+				return Remove([idObject], player, out response);
 
 			response = $"Unable to find object with ID of {id}!";
 			return false;
 		}
 
 		if (ToolGunHandler.TryGetMapObject(player, out MapEditorObject mapEditorObject))
-		{
-			ToolGunHandler.DeleteObject(mapEditorObject);
-			response = "You've successfully deleted the object!";
-
-			return true;
-		}
+			return Remove([mapEditorObject], player, out response);
 
 		response = "You aren't looking at any Map Editor object!";
 		return false;
+	}
+
+	private static bool Remove(IReadOnlyList<MapEditorObject> objects, Player player, out string response)
+	{
+		if (objects.Count == 0)
+		{
+			response = "No objects selected.";
+			return false;
+		}
+		if (!ToolGunHandler.DeleteObjects(objects, player))
+		{
+			response = "One of these objects is being grabbed or is no longer available.";
+			return false;
+		}
+		response = $"Removed {objects.Count} object(s). Use mp undo to restore them.";
+		return true;
 	}
 }

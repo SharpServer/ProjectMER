@@ -43,8 +43,15 @@ public class Set : ICommand
 
 		if (arguments.Count >= 3 && TryGetVector(arguments.At(0), arguments.At(1), arguments.At(2), out Vector3 newScale))
 		{
+			if (global::ProjectMER.Commands.Modifying.Position.SubCommands.Grab.IsGrabbing(mapEditorObject.Base))
+			{
+				response = "Release the grabbed object before making this edit.";
+				return false;
+			}
+			EditorHistory.State before = EditorHistory.Capture(mapEditorObject);
 			mapEditorObject.Base.Scale = newScale;
 			mapEditorObject.UpdateObjectAndCopies();
+			EditorHistory.RecordEdit(player, "scale", "mpr.scale", [before]);
 
 			response = mapEditorObject.Base.Scale.ToString("F3");
 			return true;

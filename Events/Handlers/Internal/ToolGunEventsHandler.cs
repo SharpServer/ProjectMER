@@ -26,7 +26,8 @@ public class ToolGunEventsHandler : CustomEventsHandler
 
 			foreach (Player player in Player.List)
 			{
-				if (!player.CurrentItem.IsToolGun(out ToolGunItem _) && !ToolGunHandler.TryGetSelectedMapObject(player, out MapEditorObject _))
+				IReadOnlyList<MapEditorObject> selection = ToolGunHandler.GetSelection(player);
+				if (!player.CurrentItem.IsToolGun(out ToolGunItem _) && selection.Count == 0)
 				{
 					if (ToolGunHsmHud.IsAvailable)
 						ToolGunHsmHud.TryHide(player);
@@ -36,7 +37,7 @@ public class ToolGunEventsHandler : CustomEventsHandler
 				string hud;
 				try
 				{
-					hud = ToolGunUI.GetHintHUD(player);
+					hud = ToolGunUI.GetHintHUD(player, selection);
 				}
 				catch (Exception e)
 				{

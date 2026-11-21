@@ -39,6 +39,9 @@ public static class RoomExtensions
 		return room.Transform.TransformPoint(position);
 	}
 
+	public static Vector3 GetRelativePosition(this Room? room, Vector3 worldPosition) =>
+		room is null || room.Name == RoomName.Outside ? worldPosition : room.Transform.InverseTransformPoint(worldPosition);
+
 	public static Quaternion GetAbsoluteRotation(this Room? room, Vector3 eulerAngles)
 	{
 		if (room is null || room.Name == RoomName.Outside)

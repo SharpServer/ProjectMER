@@ -42,7 +42,8 @@ public class TeleportObject : MonoBehaviour, ITeleporter
 
 			foreach (TeleportObject teleportObject in teleportObjects)
 			{
-				if (teleportObject == this || !teleportObject.TryInitialize() || teleportObject._mapEditorObject.Id != targetId)
+				if (teleportObject == this || !teleportObject.TryInitialize() ||
+					teleportObject._mapEditorObject.Id != targetId || !TeleportHelper.IsTriggerEnabled(teleportObject._trigger))
 					continue;
 
 				return teleportObject;

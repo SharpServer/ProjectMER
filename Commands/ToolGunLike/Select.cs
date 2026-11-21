@@ -1,4 +1,5 @@
 using CommandSystem;
+using System.Globalization;
 using LabApi.Features.Permissions;
 using LabApi.Features.Wrappers;
 using ProjectMER.Features;
@@ -20,7 +21,7 @@ public class Select : ICommand
 	public string[] Aliases { get; } = ["sel", "choose"];
 
 	/// <inheritdoc/>
-	public string Description => "Selects the object which you are looking at.";
+	public string Description => "Select by aim, ID or radius. Usage: select [add|remove] [<id> ... | near <meters>], select list, select clear.";
 
 	public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
 	{
@@ -37,37 +38,79 @@ public class Select : ICommand
 			return false;
 		}
 
-		if (arguments.Count > 0)
+		string mode = arguments.Count == 0 ? string.Empty : arguments.At(0).ToLowerInvariant();
+		if (mode == "list" || mode == "clear")
 		{
-			string id = arguments.At(0);
-			if (ToolGunHandler.TryGetObjectById(id, out MapEditorObject idObject))
+			if (arguments.Count != 1)
 			{
-				ToolGunHandler.SelectObject(player, idObject);
-				response = "You've successfully selected the object!";
-				return true;
+				response = $"Usage: mer select {mode}";
+				return false;
 			}
-
-			response = $"Unable to find object with ID of {id}!";
-			return false;
-		}
-
-		// Try getting and selecting the object.
-		if (ToolGunHandler.TryGetMapObject(player, out MapEditorObject mapEditorObject))
-		{
-			ToolGunHandler.SelectObject(player, mapEditorObject);
-			response = "You've successfully selected the object!";
+			if (mode == "clear") ToolGunHandler.ClearSelection(player);
+			response = DescribeSelection(player);
 			return true;
 		}
 
-		// If object wasn't found deselect currently selected object.
-		if (ToolGunHandler.TryGetSelectedMapObject(player, out MapEditorObject _))
+		bool append = mode == "add";
+		bool remove = mode == "remove";
+		int start = append || remove ? 1 : 0;
+		IReadOnlyList<MapEditorObject> targets;
+		if (arguments.Count > start && arguments.At(start).Equals("near", StringComparison.OrdinalIgnoreCase))
 		{
-			ToolGunHandler.SelectObject(player, null!);
-			response = "You've successfully unselected the object!";
+			if (arguments.Count != start + 2 ||
+				!float.TryParse(arguments.At(start + 1), NumberStyles.Float, CultureInfo.InvariantCulture, out float radius) ||
+				!(radius > 0f) || float.IsInfinity(radius))
+			{
+				response = "Specify a positive radius in meters, e.g. mer select near 10.";
+				return false;
+			}
+			targets = ToolGunHandler.FindNearbyObjects(player.Position, radius);
+			if (targets.Count == 0)
+			{
+				response = "No editable objects in that radius.";
+				return false;
+			}
+		}
+		else if (arguments.Count > start)
+		{
+			List<MapEditorObject> objects = [];
+			for (int i = start; i < arguments.Count; i++)
+			{
+				string id = arguments.At(i);
+				if (!ToolGunHandler.TryGetObjectById(id, out MapEditorObject obj))
+				{
+					response = $"Unable to find object with ID '{id}'.";
+					return false;
+				}
+				objects.Add(obj);
+			}
+			targets = objects;
+		}
+		else if (ToolGunHandler.TryGetMapObject(player, out MapEditorObject aimed))
+		{
+			targets = [aimed];
+		}
+		else
+		{
+			if (!append && !remove && ToolGunHandler.GetSelection(player).Count > 0)
+				ToolGunHandler.ClearSelection(player);
+			response = "You aren't looking at any object.";
 			return false;
 		}
 
-		response = "You aren't looking at any object!";
-		return false;
+		if (remove) ToolGunHandler.RemoveSelection(player, targets);
+		else ToolGunHandler.SetSelection(player, targets, append);
+		IReadOnlyList<MapEditorObject> selection = ToolGunHandler.GetSelection(player);
+		response = selection.Count == 0 ? "No objects selected." :
+			$"{selection.Count} selected. Primary: {selection[0].Id}.";
+		return true;
+	}
+
+	private static string DescribeSelection(Player player)
+	{
+		IReadOnlyList<MapEditorObject> selection = ToolGunHandler.GetSelection(player);
+		if (selection.Count == 0) return "No objects selected.";
+		return $"{selection.Count} selected (first is the primary):\n" +
+			string.Join("\n", selection.Select(obj => $"{obj.Id}  {obj.MapName}  {obj.Base.GetType().Name}"));
 	}
 }

@@ -2,6 +2,7 @@ using LabApi.Events.Arguments.PlayerEvents;
 using LabApi.Events.Arguments.ServerEvents;
 using LabApi.Events.CustomHandlers;
 using MEC;
+using ProjectMER.Commands.Modifying.Position.SubCommands;
 using ProjectMER.Features;
 using ProjectMER.Features.Objects;
 using ProjectMER.Features.Serializable;
@@ -18,13 +19,13 @@ public class GenericEventsHandler : CustomEventsHandler
 		// WaitingForPlayers is also reached after forced/admin restarts where RoundEnded may not
 		// have completed. The server tears down scene objects; only stop pending work and forget
 		// references here so already-destroyed Unity objects are never destroyed a second time.
+		ClearEditorState();
 		MapUtils.ResetRoundState();
 		PrimitiveOptimizationManager.Stop();
 
 		PrefabManager.RegisterPrefabs();
 
 		ToolGunItem.ItemDictionary.Clear();
-		ToolGunHandler.PlayerSelectedObjectDict.Clear();
 		PickupEventsHandler.ButtonPickups.Clear();
 		PickupEventsHandler.PickupUsesLeft.Clear();
 		PickupEventsHandler.CustomItemPickupUses.Clear();
@@ -39,14 +40,30 @@ public class GenericEventsHandler : CustomEventsHandler
 		// クライアント専用 Primitive の内部状態を停止する。シーン実体はサーバーの
 		// ラウンド teardown が破棄するため、ProjectMER は参照だけを解放する。
 		CullingManager.ResetRoundState();
+		ClearEditorState();
 		MapUtils.ResetRoundState();
 		PrimitiveOptimizationManager.Stop();
 	}
 
 	public override void OnServerShutdown()
 	{
+		ClearEditorState();
 		CullingManager.Stop();
 		PrimitiveOptimizationManager.Stop();
+	}
+
+	public override void OnPlayerLeft(PlayerLeftEventArgs ev)
+	{
+		Grab.Stop(ev.Player);
+		ToolGunHandler.ClearSelection(ev.Player);
+		EditorHistory.Forget(ev.Player);
+	}
+
+	internal static void ClearEditorState()
+	{
+		Grab.StopAll();
+		ToolGunHandler.ClearSelections();
+		EditorHistory.Clear();
 	}
 
 	public override void OnPlayerSpawning(PlayerSpawningEventArgs ev)

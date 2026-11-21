@@ -1,10 +1,12 @@
-using System.Reflection;
 using System.Text;
 using LabApi.Features.Wrappers;
 using NorthwoodLib.Pools;
+using ProjectMER.Commands.Modifying.Position.SubCommands;
 using ProjectMER.Features.Enums;
 using ProjectMER.Features.Extensions;
 using ProjectMER.Features.Objects;
+using ProjectMER.Features.Serializable;
+using ProjectMER.Features.Serializable.Schematics;
 using UnityEngine;
 using UserSettings.ServerSpecific;
 using YamlDotNet.Serialization;
@@ -13,35 +15,40 @@ namespace ProjectMER.Features.ToolGun;
 
 public static class ToolGunUI
 {
-	public static string GetHintHUD(Player player)
+	public static string GetHintHUD(Player player) => GetHintHUD(player, ToolGunHandler.GetSelection(player));
+
+	internal static string GetHintHUD(Player player, IReadOnlyList<MapEditorObject> selected)
 	{
 		StringBuilder sb = StringBuilderPool.Shared.Rent();
 
 		sb.Append("<font=\"LiberationSans SDF\">");
 
-		object instance = null!;
-		List<PropertyInfo> properties = [];
-		if (ToolGunHandler.TryGetSelectedMapObject(player, out MapEditorObject mapEditorObject) && mapEditorObject != null)
+		IReadOnlyList<MapEditorObject> grabbed = Grab.GetGrabbedObjects(player);
+		if (grabbed.Count > 1)
 		{
-			instance = mapEditorObject.GetType().GetField("Base").GetValue(mapEditorObject);
-			properties = instance.GetType().GetProperties().ToList();
+			AppendGroup(sb, grabbed, grabbing: true);
 		}
-
-		if (mapEditorObject != null)
+		else if (selected.Count > 1)
 		{
+			AppendGroup(sb, selected, grabbing: false);
+		}
+		else if (selected.Count == 1)
+		{
+			MapEditorObject mapEditorObject = selected[0];
 			sb.Append($"<size=50%>MapName: {MapUtils.GetColoredMapName(mapEditorObject.MapName)}</size>");
 			sb.AppendLine();
 			sb.Append($"<size=50%>ID: {MapUtils.GetColoredString(mapEditorObject.Id)}</size>");
 			sb.AppendLine();
-		}
 
-		foreach (string property in properties.GetColoredProperties(instance))
+			object instance = mapEditorObject.Base;
+			foreach (string property in instance.GetType().GetProperties().ToList().GetColoredProperties(instance))
 			{
 				sb.Append($"<size=50%>");
 				sb.Append(property);
 				sb.Append("</size>");
 				sb.AppendLine();
 			}
+		}
 
 		if (!player.CurrentItem.IsToolGun(out ToolGunItem toolGun))
 		{
@@ -68,6 +75,35 @@ public static class ToolGunUI
 		sb.Append("</font>");
 
 		return StringBuilderPool.Shared.ToStringReturn(sb);
+	}
+
+	private static void AppendGroup(StringBuilder sb, IReadOnlyList<MapEditorObject> objects, bool grabbing)
+	{
+		const int previewCount = 3;
+		sb.Append("<size=50%><color=#66D9FF><b>").Append(grabbing ? "GRABBING" : "SELECTED")
+			.Append(" · ").Append(objects.Count).Append(" OBJECTS</b></color>\n");
+		sb.Append(string.Join(", ", objects.Take(previewCount).Select(GetShortObjectName)));
+		if (objects.Count > previewCount)
+			sb.Append("  <color=#B3B3B3>+").Append(objects.Count - previewCount).Append(" more</color>");
+		sb.Append("\n<color=#B3B3B3>").Append(grabbing ? "mer pos grab · release" : "mer select list · show all")
+			.Append("</color></size>\n");
+	}
+
+	private static string GetShortObjectName(MapEditorObject obj)
+	{
+		if (obj == null) return "Removed";
+
+		string name = obj.Base switch
+		{
+			SerializableSchematic schematic when !string.IsNullOrWhiteSpace(schematic.SchematicName) => schematic.SchematicName,
+			SerializableItemSpawnpoint pickup when !string.IsNullOrWhiteSpace(pickup.Item) => pickup.Item,
+			SerializableDoor door => $"{door.DoorType} Door",
+			SerializableTeleport => $"Teleport {obj.Id}",
+			_ => obj.Base.GetType().Name.Replace("Serializable", string.Empty),
+		};
+		name = name.Replace('<', '‹').Replace('>', '›').Replace('\n', ' ').Replace('\r', ' ');
+		const int nameLimit = 20;
+		return name.Length > nameLimit ? name.Substring(0, nameLimit - 1) + "…" : name;
 	}
 
 	private static string GetToolGunModeString(Player player, ToolGunItem toolGun)

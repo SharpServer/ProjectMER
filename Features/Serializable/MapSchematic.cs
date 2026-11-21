@@ -568,4 +568,19 @@ public class MapSchematic
 		IsDirty = dirtyPrevValue;
 		return false;
 	}
+
+	internal SerializableObject? FindElement(string id)
+	{
+		System.Collections.IDictionary[] collections =
+		[
+			Primitives, Lights, Doors, Workstations, ItemSpawnpoints, PlayerSpawnpoints, Capybaras,
+			Texts, Interactables, Scp079Cameras, ShootingTargets, Schematics, Teleports, Lockers,
+			Waypoints, CustomTriggerPoints, ObjectPrefabMarkers, PrefabMarkers, EventInvokeMarkers,
+		];
+		foreach (System.Collections.IDictionary collection in collections)
+		{
+			if (collection[id] is SerializableObject element) return element;
+		}
+		return null;
+	}
 }

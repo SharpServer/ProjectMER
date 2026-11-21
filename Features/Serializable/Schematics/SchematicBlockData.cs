@@ -67,6 +67,7 @@ public class SchematicBlockData
 			BlockType.Interactable => CreateInteractable(),
 			BlockType.Waypoint => CreateWaypoint(),
 			BlockType.Locker => CreateLocker(),
+			BlockType.ParticleEmitter => CreateParticleEmitter(),
 			// Teleport ブロックの実体は <Name>-Teleports.json 側で生成されるため、
 			// ここでは階層を保つための空 GO だけを作る（警告は出さない）。
 			BlockType.Teleport => CreateEmpty(),
@@ -110,6 +111,40 @@ public class SchematicBlockData
 		}
 
 		return gameObject;
+	}
+
+	/// <summary>
+	/// エミッタ本体はネットワーク不要なアンカー。粒子玩具は Start までに生成して Spawn する。
+	/// アンカー自体を AdminToy にしないのは、プリミティブ最適化の対象になって
+	/// Spawn が遅延し、エミッタが動かなくなるのを避けるため。
+	/// </summary>
+	private GameObject CreateParticleEmitter()
+	{
+		GameObject anchor = new GameObject();
+		ParticleSim.ParticleSettings settings = SchematicParticleEmitter.ParseSettings(Properties);
+		int seed = Properties.GetInt("Seed", 0);
+		float cullDistance = Properties.GetFloat("ParticleCullDistance", 40f);
+		float sizeScale = Properties.GetFloat("SizeScale", 1f);
+		float distanceSizeGrowth = Properties.GetFloat("DistanceSizeGrowth", 0f);
+		float particleSpacing = Properties.GetFloat("ParticleSpacing", 1f);
+		float expansionDistance = Properties.GetFloat("ExpansionDistance", 0f);
+
+		Vector3 positionOffset = Vector3.zero;
+		Dictionary<string, object>? offset = Properties.TryGetValueSafe("PositionOffset", out object rawOffset)
+			? rawOffset.AsDictionary()
+			: null;
+		if (offset != null)
+		{
+			positionOffset = new Vector3(
+				offset.GetFloat("x", 0f),
+				offset.GetFloat("y", 0f),
+				offset.GetFloat("z", 0f));
+		}
+
+		anchor.AddComponent<SchematicParticleEmitter>().Configure(
+			settings, seed, cullDistance, positionOffset, sizeScale, distanceSizeGrowth,
+			particleSpacing, expansionDistance);
+		return anchor;
 	}
 
 	private GameObject CreateEmpty(bool fallback = false)

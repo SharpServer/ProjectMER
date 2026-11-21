@@ -48,4 +48,9 @@ public enum BlockType
 	Text = 8,
 	Interactable = 9,
 	Waypoint = 10,
+
+	/// <summary>
+	/// パーティクルエミッタ（プリミティブ AdminToy のプールで描画する）。
+	/// </summary>
+	ParticleEmitter = 11,
 }

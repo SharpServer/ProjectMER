@@ -159,10 +159,17 @@ public class AnimatedPropertySync : MonoBehaviour
 		{
 			ref Binding b = ref _bindings[i];
 			float value = _animator.GetFloat(b.Hash);
-			if (Mathf.Approximately(value, b.Last))
+
+			// プリミティブの色チャンネルは量子化後の値で比較する。
+			// 生のアニメーション値は毎フレーム微小に動くため、そのまま比較すると
+			// フェード中に毎回書き込みが走り、クライアントの CachedMaterials が増え続ける。
+			bool alpha = b.Prop == Prop.ColorA;
+			bool colorChannel = alpha || b.Prop == Prop.ColorR || b.Prop == Prop.ColorG || b.Prop == Prop.ColorB;
+			float compared = colorChannel ? SchematicColor.QuantizeChannel(value, alpha) : value;
+			if (Mathf.Approximately(compared, b.Last))
 				continue;
 
-			b.Last = value;
+			b.Last = compared;
 			if (b.Primitive != null)
 			{
 				if (b.Primitive.Toy != null)
@@ -200,7 +207,10 @@ public class AnimatedPropertySync : MonoBehaviour
 			case Prop.ColorG:
 			case Prop.ColorB:
 			case Prop.ColorA:
-				s.Toy.NetworkMaterialColor = WithChannel(s.Toy.NetworkMaterialColor, prop, value);
+				// 最終色を有限パレットへ丸めてから書く。他チャンネルの既存値が
+				// パレット外だと、1 チャンネルだけ丸めても色全体は増え続ける。
+				s.Toy.NetworkMaterialColor = SchematicColor.Quantize(
+					WithChannel(s.Toy.NetworkMaterialColor, prop, value));
 				break;
 			case Prop.Visible:
 			case Prop.Collidable:
